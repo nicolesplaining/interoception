@@ -124,6 +124,30 @@ def chunk_latency():
     print(chunk_latency_calc.remote())
 
 
+def _resume_arg_if_needed(cfg_path: str) -> list[str]:
+    """If the TOML's output_dir already contains checkpoints, return
+    ['--ckpt.resume-step', '-1'] so prime-rl resumes from the latest step
+    instead of crashing on the output-dir-exists guard. Makes train_run
+    idempotent across budget/preemption-induced re-runs of the same call."""
+    import os
+    import tomllib
+    with open(cfg_path, "rb") as f:
+        cfg = tomllib.load(f)
+    output_dir = cfg.get("output_dir")
+    if not output_dir:
+        return []
+    weights_dir = f"{output_dir}/weights"
+    try:
+        steps = [d for d in os.listdir(weights_dir) if d.startswith("step_")]
+    except FileNotFoundError:
+        return []
+    if not steps:
+        return []
+    latest = max(int(d.split("_", 1)[1]) for d in steps)
+    print(f"[prime-rl] detected existing checkpoints at {weights_dir} (latest step_{latest}); resuming", flush=True)
+    return ["--ckpt.resume-step", "-1"]
+
+
 @app.function(
     # 2 GPUs: prime-rl runs vllm on one set, trainer on another. Matches the
     # gsm8k example's orchestrator gpu allocation pattern.
@@ -131,7 +155,9 @@ def chunk_latency():
     image=image,
     volumes={"/cache": volume},
     secrets=[wandb_secret],
-    timeout=6 * 3600,
+    # 10h: a 500-step Qwen3-4B run at ~30-40s/step + image build + step-0 eval
+    # comes to ~7-8h; the previous 6h ceiling clipped the yolo run 25 steps short.
+    timeout=10 * 3600,
 )
 def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception",
               extra_args: list[str] | None = None) -> dict:
@@ -176,6 +202,7 @@ def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception
         "@", cfg_path,
         "--wandb.project", wandb_project,
         "--wandb.name", run_name,
+        *_resume_arg_if_needed(cfg_path),
         *(extra_args or []),
     ]
     print(f"[prime-rl] launching: {' '.join(cmd)}", flush=True)
