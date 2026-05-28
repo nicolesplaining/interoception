@@ -21,6 +21,7 @@ interval = 100
 
 [wandb]
 project = "interoception"
+entity = "singhh5050-stanford-university"
 name = "ctrl0-qwen25-3b-u1-40-yolo"
 
 [model]

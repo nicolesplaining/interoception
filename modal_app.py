@@ -137,15 +137,35 @@ def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception
               extra_args: list[str] | None = None) -> dict:
     """Run a prime-rl training job. prime-rl orchestrates vllm + trainer internally.
 
+    Local logging mirror — everything wandb sees also lands on the
+    `interoception-cache` volume under /cache/run_logs/<run_name>/:
+      - wandb/run-*/   complete local wandb archive (metrics binary log +
+                       every eval sample table written as JSON). Belt-and-
+                       suspenders against the wandb cloud sync being partial
+                       or delayed.
+      - stdout.log     tee of prime-rl stdout+stderr (live Modal logs expire;
+                       this one survives).
+    The volume is committed every ~10 min during the run so a mid-run crash
+    still leaves the logs on disk (Modal volume writes are buffered until
+    volume.commit()).
+
     extra_args: optional CLI overrides appended to `rl @ <toml>` (e.g. for smokes:
     ['--max-steps', '4', '--ckpt.interval', '2', '--output-dir', '/cache/runs/x_smoke'])."""
     import os
     import subprocess
+    import sys
     import time
+
+    log_dir = f"/cache/run_logs/{run_name}"
+    os.makedirs(log_dir, exist_ok=True)
 
     os.environ["HF_HOME"] = "/cache/hf"
     os.environ["WANDB_PROJECT"] = wandb_project
     os.environ["WANDB_NAME"] = run_name
+    # wandb writes its full local archive under WANDB_DIR/wandb/run-*/. Pointing
+    # this at the volume gives us a durable on-disk copy of everything wandb
+    # streams, independent of the cloud upload.
+    os.environ["WANDB_DIR"] = log_dir
 
     cfg_path = f"/root/configs/{toml_name}"
     if not os.path.exists(cfg_path):
@@ -159,11 +179,31 @@ def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception
         *(extra_args or []),
     ]
     print(f"[prime-rl] launching: {' '.join(cmd)}", flush=True)
+    print(f"[prime-rl] local mirror: {log_dir}", flush=True)
     t0 = time.time()
-    # NO capture_output: let stdout/stderr stream to container fd's so Modal
-    # logs them live. We give up the stdout_tail in the result dict, but the
-    # volume's logs/ dir + wandb have everything needed for forensic auditing.
-    proc = subprocess.run(cmd, cwd="/root/prime-rl", text=True)
+
+    # Tee stdout+stderr to the container fds (live Modal logs) AND to a file
+    # on the volume (durable post-crash record). Inline periodic volume.commit
+    # piggybacks on the stdout loop — no background thread (avoids any
+    # thread-safety questions about the Modal client).
+    log_path = f"{log_dir}/stdout.log"
+    last_commit = time.time()
+    with open(log_path, "w", buffering=1) as logf:  # line-buffered
+        proc = subprocess.Popen(
+            cmd, cwd="/root/prime-rl", text=True,
+            stdout=subprocess.PIPE, stderr=subprocess.STDOUT, bufsize=1,
+        )
+        for line in proc.stdout:
+            sys.stdout.write(line)
+            sys.stdout.flush()
+            logf.write(line)
+            if time.time() - last_commit > 600:
+                try:
+                    volume.commit()
+                except Exception as e:
+                    print(f"[volume.commit] warning: {e}", flush=True)
+                last_commit = time.time()
+        proc.wait()
     dur = time.time() - t0
 
     volume.commit()
@@ -171,6 +211,7 @@ def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception
         "ok": proc.returncode == 0,
         "returncode": proc.returncode,
         "duration_s": round(dur, 1),
+        "log_dir": log_dir,
     }
 
 
