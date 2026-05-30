@@ -107,6 +107,13 @@ class InteroceptionConfig(BaseModel):
     # The sim assumes prefix caching is enabled (only charges prefill on turn 1).
     hardware: str = "A100_80GB"
     sim_model: str = "Qwen3-4B"
+    # Prompt-salience experiment (2026-05-29). Tests whether the model is T-blind
+    # because the budget signal was too quiet in the prompt format, or whether it
+    # fundamentally cannot use T.
+    #   "base"             — original prompt + "[X.Xs elapsed]" injection.
+    #   "remaining_budget" — stricter prompt; injection re-states budget and
+    #     remaining time every turn ("[8.5s elapsed, 3.5s remaining of 12s budget]").
+    prompt_variant: Literal["base", "remaining_budget"] = "base"
 
 
 def _build_prompt(nums: list[int], target: int) -> str:
@@ -117,7 +124,28 @@ def _build_prompt(nums: list[int], target: int) -> str:
     )
 
 
-def _build_system_prompt(target_s: float, inject_elapsed: bool = True) -> str:
+def _build_system_prompt(target_s: float, inject_elapsed: bool = True, variant: str = "base") -> str:
+    if variant == "remaining_budget":
+        # Stricter framing. The probe of long-500 showed completion length and
+        # elapsed-at-commit are uncorrelated with T (r≈0, p>0.4). Same was true
+        # at base. This variant tests whether re-stating the budget at every
+        # turn makes T salient enough for the policy to use it.
+        head = (
+            "You are solving a problem under a STRICT wallclock time budget.\n"
+            f"You have only {target_s:.0f} seconds total. Commit your final answer "
+            "BEFORE the budget runs out.\n"
+        )
+        if not inject_elapsed:
+            return head + (
+                "Work within this budget. When you are ready, output your final answer inside "
+                "<answer>...</answer> tags. Anything after </answer> is ignored."
+            )
+        return head + (
+            "After each of your turns the user will tell you both the elapsed time AND the "
+            f"time remaining (out of your {target_s:.0f}s budget). Track your remaining budget "
+            "closely — when you are nearly out of time, commit immediately to your best current "
+            "answer inside <answer>...</answer> tags. Anything after </answer> is ignored."
+        )
     base = (
         "You are solving a problem under a wallclock time budget.\n"
         f"Your budget is {target_s:.0f} seconds.\n"
@@ -184,7 +212,8 @@ class CountdownTimeBudgetEnv(vf.MultiTurnEnv):
         prompt = state.get("prompt") or []
         if not prompt or prompt[0].get("role") != "system":
             state["prompt"] = [
-                {"role": "system", "content": _build_system_prompt(state["target_s"], self.cfg.inject_elapsed)},
+                {"role": "system", "content": _build_system_prompt(
+                    state["target_s"], self.cfg.inject_elapsed, self.cfg.prompt_variant)},
                 *prompt,
             ]
         return state
@@ -270,6 +299,10 @@ class CountdownTimeBudgetEnv(vf.MultiTurnEnv):
         if not self.cfg.inject_elapsed:
             return []
 
+        if self.cfg.prompt_variant == "remaining_budget":
+            remaining = max(0.0, state["target_s"] - state["elapsed_s"])
+            return [{"role": "user", "content":
+                f"[{state['elapsed_s']:.1f}s elapsed, {remaining:.1f}s remaining of your {state['target_s']:.0f}s budget]"}]
         return [{"role": "user", "content": f"[{state['elapsed_s']:.1f}s elapsed]"}]
 
     @vf.stop

@@ -83,6 +83,9 @@ image = (
     # data + configs read at runtime, no install step after — non-copy mounts.
     .add_local_dir("data", remote_path="/root/data")
     .add_local_dir("configs", remote_path="/root/configs")
+    # The prompt-salience eval script is invoked directly in `eval_prompt_salience`.
+    .add_local_file("scripts/eval_prompt_salience.py",
+                    remote_path="/root/scripts/eval_prompt_salience.py")
 )
 
 app = modal.App(APP_NAME)
@@ -155,9 +158,10 @@ def _resume_arg_if_needed(cfg_path: str) -> list[str]:
     image=image,
     volumes={"/cache": volume},
     secrets=[wandb_secret],
-    # 10h: a 500-step Qwen3-4B run at ~30-40s/step + image build + step-0 eval
-    # comes to ~7-8h; the previous 6h ceiling clipped the yolo run 25 steps short.
-    timeout=10 * 3600,
+    # 24h is Modal's max (no unlimited option). Effectively no limit for our
+    # use case — 1000-step runs at ~30-40s/step take ~10h and we want plenty
+    # of buffer for slow steps + the post-training final eval.
+    timeout=24 * 3600,
 )
 def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception",
               extra_args: list[str] | None = None) -> dict:
@@ -438,3 +442,224 @@ def sweep():
             r = {"ok": False, "error": str(e)[:200]}
         results.append(r)
         print(f"  {cfg[1]}: ok={r.get('ok')}  rc={r.get('returncode')}  dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+# ---------------------------------------------------------------------------
+# Prompt-salience eval (2026-05-29). Tests whether long-500's T-blindness can
+# be unlocked by a more aggressive budget prompt. Inference-only — no training.
+# ---------------------------------------------------------------------------
+
+@app.function(
+    gpu="A100-80GB:1",
+    image=image,
+    volumes={"/cache": volume},
+    timeout=2 * 3600,
+)
+def eval_prompt_salience_run(
+    base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
+    adapter_path: str | None = None,
+    adapter_name: str = "long-500",
+    run_label: str | None = None,
+    variants: tuple[str, ...] = ("base", "remaining_budget"),
+    num_examples: int = 498,
+    output_subdir: str = "prompt_salience",
+) -> dict:
+    """Run scripts/eval_prompt_salience.py inside Modal against the cache volume.
+
+    Outputs land at /cache/eval_rollouts/<output_subdir>/<run_label>_<variant>.jsonl
+    so multiple invocations (base, long-500, etc.) accumulate under one dir."""
+    import os
+    import subprocess
+    import time
+
+    out_dir = f"/cache/eval_rollouts/{output_subdir}"
+    os.makedirs(out_dir, exist_ok=True)
+    label = run_label or (adapter_name if adapter_path else "base")
+
+    cmd = [
+        "/root/.local/bin/uv", "run", "python", "/root/scripts/eval_prompt_salience.py",
+        "--base-model", base_model,
+        "--num-examples", str(num_examples),
+        "--variants", *variants,
+        "--output-dir", out_dir,
+        "--run-label", label,
+        "--problems-jsonl", "/root/data/eval.jsonl",
+    ]
+    if adapter_path:
+        cmd += ["--adapter-path", adapter_path, "--adapter-name", adapter_name]
+    print(f"[prompt-salience] launching: {' '.join(cmd)}", flush=True)
+    t0 = time.time()
+    proc = subprocess.run(cmd, cwd="/root/prime-rl", text=True)
+    volume.commit()
+    return {"ok": proc.returncode == 0, "returncode": proc.returncode,
+            "duration_s": round(time.time() - t0, 1), "out_dir": out_dir, "label": label}
+
+
+@app.local_entrypoint()
+def eval_prompt_salience(
+    base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
+    skip_base: bool = False,
+    skip_long500: bool = False,
+    num_examples: int = 498,
+):
+    """Modal entrypoint: run the prompt-salience eval for {base, long-500} × {base, remaining_budget}.
+
+    Outputs land on the `interoception-cache` volume at
+    /cache/eval_rollouts/prompt_salience/<label>_<variant>.jsonl. Pull with
+    `modal volume get interoception-cache eval_rollouts/prompt_salience ./...`."""
+    long500_adapter = "/cache/runs/ctrl0_u1_40_long_qwen3_4b/weights/step_500/lora_adapters"
+    jobs = []
+    if not skip_base:
+        jobs.append({"adapter_path": None, "adapter_name": "base", "run_label": "base"})
+    if not skip_long500:
+        jobs.append({"adapter_path": long500_adapter, "adapter_name": "long-500",
+                     "run_label": "long-500"})
+    print(f"Launching {len(jobs)} prompt-salience eval(s)")
+    calls = []
+    for j in jobs:
+        calls.append((j, eval_prompt_salience_run.spawn(
+            base_model=base_model, num_examples=num_examples, **j)))
+    for j, c in calls:
+        try:
+            r = c.get()
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:200]}
+        print(f"  {j['run_label']}: ok={r.get('ok')}  rc={r.get('returncode')}  "
+              f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+# ---------------------------------------------------------------------------
+# Resume-from-step-500 extension (Kanishk, 2026-05-29). Copies the long-500
+# step_500 checkpoint into the extension's output_dir, then launches train_run
+# which auto-resumes via _resume_arg_if_needed.
+# ---------------------------------------------------------------------------
+
+@app.function(image=image, volumes={"/cache": volume}, timeout=600)
+def seed_checkpoint_from(src_run: str, dst_run: str, step: int) -> dict:
+    """Seed a fresh prime-rl output_dir from another run's step_{step} so the
+    new run can resume training (not just inference) from that point.
+
+    prime-rl stores resume state across TWO sibling dirs:
+      - weights/step_N/       — model weights (LoRA adapter + merged model)
+      - checkpoints/step_N/   — trainer/optimizer/scheduler state (.distcp)
+
+    Both must be present in the new output_dir, otherwise prime-rl logs
+    'Training from scratch' and ignores the seed. Also wipes any stale
+    extended-run state (wandb, run_default, logs, configs) so the resume
+    starts clean."""
+    import shutil
+    import os
+    new_root = f"/cache/runs/{dst_run}"
+    # Wipe any pre-existing aux dirs from a partial prior launch so prime-rl
+    # doesn't see stale state.
+    for stale in ("wandb", "run_default", "logs", "configs", "rollouts"):
+        p = os.path.join(new_root, stale)
+        if os.path.isdir(p):
+            shutil.rmtree(p)
+
+    copied = []
+    for sub in ("weights", "checkpoints"):
+        src = f"/cache/runs/{src_run}/{sub}/step_{step}"
+        dst_root = f"{new_root}/{sub}"
+        dst = f"{dst_root}/step_{step}"
+        if not os.path.isdir(src):
+            return {"ok": False, "error": f"missing source: {src}"}
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)
+        os.makedirs(dst_root, exist_ok=True)
+        shutil.copytree(src, dst)
+        copied.append({"dst": dst, "n_files": len(os.listdir(dst))})
+    volume.commit()
+    return {"ok": True, "src_run": src_run, "dst_run": dst_run,
+            "step": step, "copied": copied}
+
+
+@app.local_entrypoint()
+def next_extended_qwen3_4b():
+    """RESUME EXP — train another 500 steps on top of long-500 (Kanishk 2026-05-29).
+
+    Two-step flow:
+      1. seed_checkpoint_from copies long-run's step_500 weights into the new
+         output_dir so prime-rl can resume from it.
+      2. train_run launches the extended config; auto-resume detects step_500
+         and continues to step_1000."""
+    print("step 1/2: seeding extended/weights/step_500 from long/weights/step_500")
+    r = seed_checkpoint_from.remote(
+        src_run="ctrl0_u1_40_long_qwen3_4b",
+        dst_run="ctrl0_u1_40_extended_qwen3_4b",
+        step=500,
+    )
+    print(f"  seed result: {r}")
+    if not r.get("ok"):
+        return
+    print("step 2/2: launching train_run on extended config")
+    _launch_one("rl/ctrl0_u1_40_extended_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-extended")
+
+
+# ---------------------------------------------------------------------------
+# Resume-from-step-400 extension (Kanishk 2026-05-30; pivot from the
+# resume-from-step-500 attempt). The original long-500 run ended at step 500
+# with the LR scheduler in end-of-decay state (lr=min_lr=0). PyTorch's
+# SequentialLR.load_state_dict overwrites a freshly-built scheduler's milestones
+# with the saved ones, so resuming from step_500 with a new max_steps=1000
+# config would advance step counts at lr=0 (no weight updates). Resuming from
+# step_400 instead — which is in the constant phase (lr=peak) — gives a clean
+# match between the loaded state and the new schedule's expectation at that step.
+# Cost: we re-train steps 400-500 with the new schedule. The original step_500
+# weights are archived rather than deleted in case we want them later.
+# ---------------------------------------------------------------------------
+
+@app.function(image=image, volumes={"/cache": volume}, timeout=600)
+def archive_step(run_name: str, step: int) -> dict:
+    """Move /cache/runs/{run}/weights/step_{N} and checkpoints/step_{N} out of the
+    way so prime-rl's auto-resume picks an earlier step. Archives to
+    /cache/archive/{run}/{weights,checkpoints}/step_{N} (preserves the data)."""
+    import os
+    import shutil
+    moved = []
+    for sub in ("weights", "checkpoints"):
+        src = f"/cache/runs/{run_name}/{sub}/step_{step}"
+        dst_root = f"/cache/archive/{run_name}/{sub}"
+        dst = f"{dst_root}/step_{step}"
+        if not os.path.isdir(src):
+            moved.append({"sub": sub, "skipped": True, "note": f"missing: {src}"})
+            continue
+        if os.path.isdir(dst):
+            shutil.rmtree(dst)  # overwrite stale archive
+        os.makedirs(dst_root, exist_ok=True)
+        shutil.move(src, dst)
+        moved.append({"sub": sub, "moved": True, "from": src, "to": dst})
+    # Report remaining latest step in weights/
+    weights_dir = f"/cache/runs/{run_name}/weights"
+    remaining = sorted(int(d.split("_", 1)[1]) for d in os.listdir(weights_dir)
+                       if d.startswith("step_") and d.split("_", 1)[1].isdigit())
+    volume.commit()
+    return {"ok": True, "run": run_name, "archived_step": step, "moved": moved,
+            "remaining_weights_steps": remaining,
+            "new_latest_step": max(remaining) if remaining else None}
+
+
+@app.local_entrypoint()
+def archive_long_step_500_and_resume():
+    """Archive long-run's step_500 (so auto-resume picks step_400 instead, which
+    has lr=peak in its saved scheduler state), then launch the resume run.
+    Resume runs from step_400 to whatever max_steps is in the config (currently 1000)."""
+    print("step 1/2: archiving long-run's step_500 to /cache/archive/")
+    r = archive_step.remote(run_name="ctrl0_u1_40_long_qwen3_4b", step=500)
+    print(f"  archive result: {r}")
+    if not r.get("ok"):
+        return
+    new_latest = r.get("new_latest_step")
+    if new_latest != 400:
+        print(f"  WARNING: expected new latest=400, got {new_latest}. Aborting launch.")
+        return
+    print("step 2/2: launching train_run on long config (will auto-resume from step_400)")
+    _launch_one("rl/ctrl0_u1_40_long_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-long")
+
+
+@app.local_entrypoint()
+def next_long1k_qwen3_4b():
+    """FRESH 1000-step run (Kanishk 2026-05-30). Clean from-scratch training to step 1000;
+    pivot from the failed resume-from-step_500 approach (LR scheduler conflict). Lets us
+    compare long-500 vs long-1000 cleanly. See configs/rl/ctrl0_u1_40_long1k_qwen3_4b.toml."""
+    _launch_one("rl/ctrl0_u1_40_long1k_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-long1k")

@@ -1,23 +1,22 @@
-# NEXT EXPERIMENT (Kanishk's 2026-05-26 thread): "train for longer".
+# EXTENSION (Kanishk, 2026-05-29): "resume training from step 500".
 #
-# Byte-identical to ctrl0_u1_40_qwen3_4b.toml EXCEPT:
-#   max_steps  200 -> 500           (train longer)
-#   [ckpt] interval 50 -> 100        (5 weight saves instead of 10 -> ~half the volume)
-#   eval interval stays 50           (10 eval points for the acc-vs-T / pacing analysis)
+# Long-500 finished with c=0.50 still climbing and f|c ~flat. Kanishk's model:
+# c and f are two competing rewards; the policy optimizes c first, then f. We're
+# in the c-optimization phase — train another 500 steps to give c room to saturate
+# so f has a chance to become the dominant gradient.
 #
-# Everything else is deliberately UNCHANGED. Kanishk was explicit: do NOT touch the
-# budget / chunk / turns. T~U(1,40), 128 tok/chunk, 16 turns stay. The model WILL miss
-# the target time most of the time at this budget — that's expected and fine; the goal is
-# to learn the balance between target-time and correctness, not to land under budget.
-# See docs/HANDOFF.md for the full rationale and launch/monitor/analysis steps.
+# Byte-identical to ctrl0_u1_40_long_qwen3_4b.toml EXCEPT:
+#   max_steps    500 -> 1000        (another 500 steps on top of the long-500 checkpoint)
+#   output_dir   ..._long...  ->  ..._extended...   (new dir; pre-seeded with step_500 weights)
+#   wandb.name   ..._long  ->  ..._extended         (clean new run for analysis)
 #
-# 2026-05-30 note: do NOT bump max_steps here to "extend" the run. PyTorch
-# SequentialLR + LinearLR semantics make resume produce lr≈0 indefinitely.
-# To train longer, use ctrl0_u1_40_long1k_qwen3_4b.toml (a fresh 1000-step run).
+# Warmup/decay are NOT re-run on resume — prime-rl's scheduler is global-step
+# indexed, so at resume step 500 we're already in the flat middle of the schedule
+# and decay still fires at steps 990-1000.
 
-max_steps = 500
+max_steps = 1000
 seq_len = 2048
-output_dir = "/cache/runs/ctrl0_u1_40_long_qwen3_4b"
+output_dir = "/cache/runs/ctrl0_u1_40_extended_qwen3_4b"
 
 [ckpt]
 interval = 100
@@ -25,7 +24,7 @@ interval = 100
 [wandb]
 project = "interoception"
 entity = "singhh5050-stanford-university"
-name = "ctrl0-qwen3-4b-u1-40-long"
+name = "ctrl0-qwen3-4b-u1-40-extended"
 
 [model]
 name = "Qwen/Qwen3-4B-Instruct-2507"
@@ -51,8 +50,6 @@ weight_decay = 0.01
 type = "default"
 kl_tau = 1e-3
 
-# warmup/decay kept from the 200-step run; for a 500-step run the LR holds at peak for
-# the long flat middle. Lengthen decay_steps (e.g. 50) if you want a gentler tail.
 [trainer.scheduler]
 type = "linear"
 warmup_steps = 10
@@ -78,7 +75,7 @@ temperature = 1.0
 
 [[orchestrator.train.env]]
 id = "interoception-countdown"
-name = "ctrl0-u1-40-long-qwen3-4b-train"
+name = "ctrl0-u1-40-extended-qwen3-4b-train"
 args = { problems_jsonl = "/root/data/train.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 0, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "hyperbolic", attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true }
 
 [orchestrator.eval]
@@ -90,7 +87,7 @@ temperature = 1.0
 
 [[orchestrator.eval.env]]
 id = "interoception-countdown"
-name = "ctrl0-u1-40-long-eval-uniform"
+name = "ctrl0-u1-40-extended-eval-uniform"
 num_examples = 498
 rollouts_per_example = 1
 args = { problems_jsonl = "/root/data/eval.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 777, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "hyperbolic", attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true }

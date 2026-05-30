@@ -23,3 +23,7 @@ sweep_audit.txt
 
 # Local run logs (transient Modal stdout from launches/smokes)
 analysis/logs/
+
+# Local Lambda dispatcher artifacts — LoRA adapters etc. fetched from Modal
+# to ship to a Lambda box. >100MB; regeneratable via scripts/run_prompt_salience.py.
+.lambda_artifacts/
