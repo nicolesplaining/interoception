@@ -716,3 +716,36 @@ def next_long_strict_qwen3_4b():
     habit (as the quiet-prompt-trained long-500 does, r=+0.15).
     See configs/rl/ctrl0_u1_40_long_strict_qwen3_4b.toml."""
     _launch_one("rl/ctrl0_u1_40_long_strict_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-long-strict")
+
+
+@app.local_entrypoint()
+def eval_long_strict_probe(num_examples: int = 498):
+    """Probe T-conditioning of long-strict step_500 (the model trained with the
+    remaining_budget prompt). Runs 2 cells in parallel:
+      - long-strict + remaining_budget: matches training distribution. Primary
+        question — does the trained model preserve the base-model T-tracking
+        (r=+0.77) or did RL degrade it like the quiet-prompt training did (r=+0.15)?
+      - long-strict + base prompt:     OOD eval. Tests whether pacing generalizes
+        off the loud signal — i.e., whether the capability is in the weights or
+        only in the prompt-context attention.
+    Both write JSONLs to /cache/eval_rollouts/prompt_salience/long-strict_*.jsonl
+    so probe_prompt_salience.py can pull them alongside the existing 4 cells."""
+    long_strict_adapter = "/cache/runs/ctrl0_u1_40_long_strict_qwen3_4b/weights/step_500/lora_adapters"
+    jobs = []
+    for variant in ("base", "remaining_budget"):
+        jobs.append({"adapter_path": long_strict_adapter,
+                     "adapter_name": "long-strict",
+                     "run_label": "long-strict",
+                     "variants": (variant,)})
+    print(f"Launching {len(jobs)} long-strict probe cells in parallel")
+    calls = []
+    for j in jobs:
+        calls.append((j, eval_prompt_salience_run.spawn(num_examples=num_examples, **j)))
+    for j, c in calls:
+        try:
+            r = c.get()
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:200]}
+        label = f"{j['run_label']}/{j['variants'][0]}"
+        print(f"  {label:30s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
+              f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
