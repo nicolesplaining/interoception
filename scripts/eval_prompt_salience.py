@@ -42,6 +42,7 @@ import math
 import os
 import pathlib
 import random
+import re
 import sys
 import time
 from typing import Any
@@ -52,6 +53,9 @@ if str(ENV_PKG) not in sys.path:
     sys.path.insert(0, str(ENV_PKG))
 
 import interoception_countdown as env_mod  # noqa: E402  — module exposes load_environment + InteroceptionConfig
+from _solver import validate_solution      # noqa: E402  — used for in-process scoring (see run_one_rollout)
+
+ANSWER_RE = re.compile(r"<answer>(.*?)(?:</answer>|$)", re.DOTALL | re.IGNORECASE)
 
 DEFAULT_SAMPLING = {
     "temperature": 1.0,
@@ -127,20 +131,47 @@ async def run_one_rollout(env, llm, sampling, lora_request, row, example_id: int
         if state.get("is_completed"):
             break
 
-    # Score via rubric (synchronously; rubric funcs are sync).
+    # Score directly: the env's rubric funcs are wrapped with prime-rl's
+    # @vf.reward decorator, which doesn't compose cleanly when invoked outside
+    # the prime-rl orchestrator runtime — calls return 0 silently. We replicate
+    # the env's hyperbolic c·f reward inline using the underlying solver.
+    parsed = state.get("parsed_answer")
+    if parsed is None:
+        # env_response only captures the parsed answer mid-rollout; if the model
+        # committed on the LAST turn (or single-turn rollouts), parsed_answer is
+        # never set. Scan the final assistant turn so those don't get mis-scored
+        # as timeouts.
+        last_text = ""
+        if trajectory:
+            last = trajectory[-1].get("completion") or []
+            if last:
+                last_text = last[-1].get("content", "") or ""
+        m = ANSWER_RE.search(last_text)
+        if m:
+            parsed = m.group(1).strip()
+        elif "<answer>" in last_text:  # opened but cut off pre-</answer>
+            parsed = last_text.split("<answer>", 1)[1].strip()
+
+    is_correct = 0
     reward = 0.0
-    for f, w in zip(env.rubric.funcs, env.rubric.weights):
-        try:
-            r = await f(state=state, answer=row["answer"])
-        except TypeError:
-            r = f(state=state, answer=row["answer"])
-        reward += w * (r or 0.0)
+    if parsed is not None:
+        ok = validate_solution(parsed, row["answer"]["nums"], row["answer"]["target"])
+        if ok is True:
+            is_correct = 1
+            t = state.get("elapsed_s", 0.0)
+            T = state.get("target_s", 1.0)
+            # Hyperbolic c·f reward (matches env's correctness_with_time for
+            # shape='hyperbolic' with enforce_max_time=False): f = min(1, T/t).
+            f_term = 1.0 if (t <= T or t == 0) else T / t
+            reward = float(f_term)  # c=1, so reward = c * f = f
 
     return {
         "example_id": example_id,
         "target_s": state["target_s"],
         "completion": chat_to_text(messages),
-        "reward": float(reward),
+        "reward": reward,
+        "is_correct": is_correct,
+        "parsed_answer": parsed,
         "elapsed_s": state.get("elapsed_s", 0.0),
         "answer_emitted": bool(state.get("answer_emitted", False)),
     }

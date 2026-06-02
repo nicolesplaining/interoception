@@ -453,7 +453,9 @@ def sweep():
     gpu="A100-80GB:1",
     image=image,
     volumes={"/cache": volume},
-    timeout=2 * 3600,
+    # 8h: ~16s/rollout × 498 × 2 variants ≈ 4.4h per (model) call; 8h gives
+    # plenty of buffer for slower-than-expected rollouts + vLLM init.
+    timeout=8 * 3600,
 )
 def eval_prompt_salience_run(
     base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
@@ -504,17 +506,23 @@ def eval_prompt_salience(
 ):
     """Modal entrypoint: run the prompt-salience eval for {base, long-500} × {base, remaining_budget}.
 
-    Outputs land on the `interoception-cache` volume at
-    /cache/eval_rollouts/prompt_salience/<label>_<variant>.jsonl. Pull with
-    `modal volume get interoception-cache eval_rollouts/prompt_salience ./...`."""
+    Spawns FOUR parallel jobs (one per (model, variant) cell) so total wall time
+    is ~2.5h instead of ~5h. Each job loads vLLM once, runs one variant. Outputs
+    land on the `interoception-cache` volume at
+    /cache/eval_rollouts/prompt_salience/<label>_<variant>.jsonl."""
     long500_adapter = "/cache/runs/ctrl0_u1_40_long_qwen3_4b/weights/step_500/lora_adapters"
-    jobs = []
+    models = []
     if not skip_base:
-        jobs.append({"adapter_path": None, "adapter_name": "base", "run_label": "base"})
+        models.append({"adapter_path": None, "adapter_name": "base", "run_label": "base"})
     if not skip_long500:
-        jobs.append({"adapter_path": long500_adapter, "adapter_name": "long-500",
-                     "run_label": "long-500"})
-    print(f"Launching {len(jobs)} prompt-salience eval(s)")
+        models.append({"adapter_path": long500_adapter, "adapter_name": "long-500",
+                       "run_label": "long-500"})
+    jobs = []
+    for m in models:
+        for variant in ("base", "remaining_budget"):
+            jobs.append({**m, "variants": (variant,)})
+    print(f"Launching {len(jobs)} prompt-salience eval cells in parallel "
+          f"({len(models)} models × 2 variants)")
     calls = []
     for j in jobs:
         calls.append((j, eval_prompt_salience_run.spawn(
@@ -524,7 +532,8 @@ def eval_prompt_salience(
             r = c.get()
         except Exception as e:
             r = {"ok": False, "error": str(e)[:200]}
-        print(f"  {j['run_label']}: ok={r.get('ok')}  rc={r.get('returncode')}  "
+        label = f"{j['run_label']}/{j['variants'][0]}"
+        print(f"  {label:30s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
               f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
 
 
@@ -663,3 +672,32 @@ def next_long1k_qwen3_4b():
     pivot from the failed resume-from-step_500 approach (LR scheduler conflict). Lets us
     compare long-500 vs long-1000 cleanly. See configs/rl/ctrl0_u1_40_long1k_qwen3_4b.toml."""
     _launch_one("rl/ctrl0_u1_40_long1k_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-long1k")
+
+
+@app.local_entrypoint()
+def long1k_smoke():
+    """Smoke test of the long1k config BEFORE the full ~10h run.
+
+    Runs the EXACT long1k config but overrides max_steps=4, ckpt.interval=2, and the
+    LR scheduler so the 4-step schedule fits (warmup=1, decay=2). Writes to a
+    *_smoke output_dir + wandb name so it doesn't pollute the real long1k state.
+
+    Verifies the smoke is happy by checking: rc=0, weights/step_{2,4} written with
+    adapter, eval at step 0 + step 4 produced Avg@1, no crashes in env / hwprop / vLLM.
+    Takes ~7-10 min on cached image (mostly the step-0 eval over 498 examples)."""
+    common = [
+        "--max-steps", "4", "--ckpt.interval", "2",
+        "--trainer.scheduler.warmup-steps", "1", "--trainer.scheduler.decay-steps", "2",
+        "--output-dir", "/cache/runs/long1k_smoke",
+    ]
+    print("Launching long1k smoke: 4 steps, ckpt every 2")
+    call = train_run.spawn(
+        "rl/ctrl0_u1_40_long1k_qwen3_4b.toml", "long1k-smoke",
+        extra_args=common,
+    )
+    try:
+        r = call.get()
+    except Exception as e:
+        r = {"ok": False, "error": str(e)[:200]}
+    print(f"  long1k-smoke: ok={r.get('ok')}  rc={r.get('returncode')}  "
+          f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
