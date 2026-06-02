@@ -111,9 +111,17 @@ class InteroceptionConfig(BaseModel):
     # because the budget signal was too quiet in the prompt format, or whether it
     # fundamentally cannot use T.
     #   "base"             — original prompt + "[X.Xs elapsed]" injection.
-    #   "remaining_budget" — stricter prompt; injection re-states budget and
-    #     remaining time every turn ("[8.5s elapsed, 3.5s remaining of 12s budget]").
-    prompt_variant: Literal["base", "remaining_budget"] = "base"
+    #   "remaining_budget" — stricter prompt + "commit immediately when out of time"
+    #     instruction; injection re-states budget and remaining time every turn
+    #     ("[8.5s elapsed, 3.5s remaining of 12s budget]").
+    #   "strict_pace"      — same per-turn injection as remaining_budget, same STRICT
+    #     framing, BUT no "commit immediately" instruction. The remaining_budget
+    #     variant gets r=+0.77 (commit_time, T) but tanks accuracy 23%→15% and the
+    #     acc-given-commit drops 64%→15% because the model literally commits its
+    #     half-baked scratch pad at the deadline. This variant tests whether
+    #     informativeness alone (without the panic trigger) preserves T-tracking
+    #     while keeping accuracy near base.
+    prompt_variant: Literal["base", "remaining_budget", "strict_pace"] = "base"
 
 
 def _build_prompt(nums: list[int], target: int) -> str:
@@ -125,6 +133,28 @@ def _build_prompt(nums: list[int], target: int) -> str:
 
 
 def _build_system_prompt(target_s: float, inject_elapsed: bool = True, variant: str = "base") -> str:
+    if variant == "strict_pace":
+        # STRICT framing + informative per-turn injection (same as remaining_budget),
+        # but WITHOUT the "commit immediately when out of time" instruction. The
+        # remaining_budget variant tanked accuracy because the model literally
+        # commits its half-baked scratch pad at the deadline. This variant lets the
+        # model choose how to spend remaining time.
+        head = (
+            "You are solving a problem under a STRICT wallclock time budget.\n"
+            f"You have only {target_s:.0f} seconds total. Commit your final answer "
+            "within this budget.\n"
+        )
+        if not inject_elapsed:
+            return head + (
+                "Work within this budget. When you are ready, output your final answer inside "
+                "<answer>...</answer> tags. Anything after </answer> is ignored."
+            )
+        return head + (
+            "After each of your turns the user will tell you both the elapsed time AND the "
+            f"time remaining (out of your {target_s:.0f}s budget). Pace yourself accordingly. "
+            "When you are ready, output your final answer inside <answer>...</answer> tags. "
+            "Anything after </answer> is ignored."
+        )
     if variant == "remaining_budget":
         # Stricter framing. The probe of long-500 showed completion length and
         # elapsed-at-commit are uncorrelated with T (r≈0, p>0.4). Same was true
@@ -299,7 +329,7 @@ class CountdownTimeBudgetEnv(vf.MultiTurnEnv):
         if not self.cfg.inject_elapsed:
             return []
 
-        if self.cfg.prompt_variant == "remaining_budget":
+        if self.cfg.prompt_variant in ("remaining_budget", "strict_pace"):
             remaining = max(0.0, state["target_s"] - state["elapsed_s"])
             return [{"role": "user", "content":
                 f"[{state['elapsed_s']:.1f}s elapsed, {remaining:.1f}s remaining of your {state['target_s']:.0f}s budget]"}]

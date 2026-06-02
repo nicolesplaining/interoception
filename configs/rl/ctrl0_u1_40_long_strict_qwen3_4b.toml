@@ -1,0 +1,97 @@
+# LONG run with the STRICT/REMAINING-BUDGET prompt (Kanishk-track follow-up, 2026-06-01).
+#
+# Direct test of the prompt-salience finding: base Qwen3-4B + remaining_budget prompt
+# gets Pearson r(commit_time, T) = +0.77 (near-perfect pacing). Long-500 (trained with
+# the quiet prompt) + remaining_budget eval gets only r = +0.15 — RL with the quiet
+# prompt actively damaged the model's T-reading.
+#
+# Hypothesis: if we train from scratch WITH the loud prompt, RL on c·f should
+# *preserve* (or amplify) the base model's pacing rather than suppress it, and we
+# should end up with both high c AND high f.
+#
+# Byte-identical to ctrl0_u1_40_long_qwen3_4b.toml EXCEPT:
+#   prompt_variant   "base" -> "remaining_budget"  (added to BOTH train and eval env args)
+#   output_dir       _long_qwen3_4b -> _long_strict_qwen3_4b
+#   wandb.name       -long -> -long-strict
+#   env names        -long-* -> -long-strict-*
+
+max_steps = 500
+seq_len = 2048
+output_dir = "/cache/runs/ctrl0_u1_40_long_strict_qwen3_4b"
+
+[ckpt]
+interval = 100
+
+[wandb]
+project = "interoception"
+entity = "singhh5050-stanford-university"
+name = "ctrl0-qwen3-4b-u1-40-long-strict"
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[trainer.model.lora]
+rank = 32
+alpha = 32.0
+dropout = 0.0
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+type = "adamw"
+lr = 5e-5
+max_norm = 1.0
+betas1 = 0.9
+betas2 = 0.999
+weight_decay = 0.01
+
+[trainer.loss]
+type = "default"
+kl_tau = 1e-3
+
+[trainer.scheduler]
+type = "linear"
+warmup_steps = 10
+decay_steps = 10
+min_lr = 0.0
+
+[orchestrator]
+batch_size = 64
+rollouts_per_example = 8   # G=8 GRPO group size
+seed = 0
+
+[[orchestrator.filters]]
+type = "gibberish"
+[[orchestrator.filters]]
+type = "repetition"
+[[orchestrator.filters]]
+type = "zero_advantage"
+enforce = false
+
+[orchestrator.train.sampling]
+max_completion_tokens = 128
+temperature = 1.0
+
+[[orchestrator.train.env]]
+id = "interoception-countdown"
+name = "ctrl0-u1-40-long-strict-qwen3-4b-train"
+args = { problems_jsonl = "/root/data/train.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 0, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "hyperbolic", attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true, prompt_variant = "remaining_budget" }
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 128
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "interoception-countdown"
+name = "ctrl0-u1-40-long-strict-eval-uniform"
+num_examples = 498
+rollouts_per_example = 1
+args = { problems_jsonl = "/root/data/eval.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 777, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "hyperbolic", attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true, prompt_variant = "remaining_budget" }
+
+[inference]
+enable_fp32_lm_head = true

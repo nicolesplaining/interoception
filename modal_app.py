@@ -502,15 +502,20 @@ def eval_prompt_salience(
     base_model: str = "Qwen/Qwen3-4B-Instruct-2507",
     skip_base: bool = False,
     skip_long500: bool = False,
+    variants: str = "base,remaining_budget",
     num_examples: int = 498,
 ):
-    """Modal entrypoint: run the prompt-salience eval for {base, long-500} × {base, remaining_budget}.
+    """Modal entrypoint: run the prompt-salience eval for {base, long-500} × variants.
 
-    Spawns FOUR parallel jobs (one per (model, variant) cell) so total wall time
-    is ~2.5h instead of ~5h. Each job loads vLLM once, runs one variant. Outputs
-    land on the `interoception-cache` volume at
-    /cache/eval_rollouts/prompt_salience/<label>_<variant>.jsonl."""
+    Spawns one parallel job per (model, variant) cell so total wall time = one
+    cell's time (~2.5h at n=498). Each job loads vLLM once and runs one variant.
+    Outputs land on the `interoception-cache` volume at
+    /cache/eval_rollouts/prompt_salience/<label>_<variant>.jsonl.
+
+    Pass --variants as a comma-separated list to override (e.g. for follow-up
+    cells: --variants strict_pace, or --variants strict_pace,remaining_budget)."""
     long500_adapter = "/cache/runs/ctrl0_u1_40_long_qwen3_4b/weights/step_500/lora_adapters"
+    variant_list = tuple(v.strip() for v in variants.split(",") if v.strip())
     models = []
     if not skip_base:
         models.append({"adapter_path": None, "adapter_name": "base", "run_label": "base"})
@@ -519,7 +524,7 @@ def eval_prompt_salience(
                        "run_label": "long-500"})
     jobs = []
     for m in models:
-        for variant in ("base", "remaining_budget"):
+        for variant in variant_list:
             jobs.append({**m, "variants": (variant,)})
     print(f"Launching {len(jobs)} prompt-salience eval cells in parallel "
           f"({len(models)} models × 2 variants)")
@@ -701,3 +706,13 @@ def long1k_smoke():
         r = {"ok": False, "error": str(e)[:200]}
     print(f"  long1k-smoke: ok={r.get('ok')}  rc={r.get('returncode')}  "
           f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+@app.local_entrypoint()
+def next_long_strict_qwen3_4b():
+    """NEXT EXP (Kanishk-track, 2026-06-01): 500-step RL with the remaining_budget
+    prompt. Tests whether training under the loud prompt preserves the base model's
+    T-tracking (r=+0.77 in eval) rather than overwriting it with a fixed-commit
+    habit (as the quiet-prompt-trained long-500 does, r=+0.15).
+    See configs/rl/ctrl0_u1_40_long_strict_qwen3_4b.toml."""
+    _launch_one("rl/ctrl0_u1_40_long_strict_qwen3_4b.toml", "ctrl0-qwen3-4b-u1-40-long-strict")
