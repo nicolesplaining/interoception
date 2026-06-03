@@ -761,3 +761,35 @@ def next_long_additive_qwen3_4b():
     See configs/rl/ctrl0_u1_40_long_additive_qwen3_4b.toml."""
     _launch_one("rl/ctrl0_u1_40_long_additive_qwen3_4b.toml",
                 "ctrl0-qwen3-4b-u1-40-long-additive")
+
+
+@app.local_entrypoint()
+def eval_long_additive_probe(num_examples: int = 498):
+    """Probe T-conditioning of long-additive step_100 (the model trained with
+    additive reward c + 0.5·f). Runs 2 cells in parallel:
+      - long-additive + remaining_budget: matches training distribution. Primary
+        question — does the additive reward preserve the high f we saw in
+        training (f≈0.95) AND have it correspond to real T-tracking?
+      - long-additive + base prompt:     OOD eval. Tests whether the pacing
+        generalizes off the loud signal.
+    Both write JSONLs to /cache/eval_rollouts/prompt_salience/long-additive_*.jsonl
+    so probe_prompt_salience.py can pull them alongside the existing cells."""
+    long_additive_adapter = "/cache/runs/ctrl0_u1_40_long_additive_qwen3_4b/weights/step_100/lora_adapters"
+    jobs = []
+    for variant in ("base", "remaining_budget"):
+        jobs.append({"adapter_path": long_additive_adapter,
+                     "adapter_name": "long-additive",
+                     "run_label": "long-additive",
+                     "variants": (variant,)})
+    print(f"Launching {len(jobs)} long-additive probe cells in parallel")
+    calls = []
+    for j in jobs:
+        calls.append((j, eval_prompt_salience_run.spawn(num_examples=num_examples, **j)))
+    for j, c in calls:
+        try:
+            r = c.get()
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:200]}
+        label = f"{j['run_label']}/{j['variants'][0]}"
+        print(f"  {label:30s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
+              f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
