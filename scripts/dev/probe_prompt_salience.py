@@ -15,10 +15,12 @@ import json, math, pathlib, re, statistics as st
 
 DATA = pathlib.Path("analysis/eval_rollouts/prompt_salience/prompt_salience")
 CELLS = [
-    ("base / base prompt",        "base_base.jsonl",                "#7f8fa6"),
-    ("base / remaining_budget",   "base_remaining_budget.jsonl",    "#27ae60"),
-    ("long-500 / base prompt",    "long-500_base.jsonl",            "#2C3E50"),
-    ("long-500 / remaining_budget","long-500_remaining_budget.jsonl","#C2185B"),
+    ("base / base prompt",              "base_base.jsonl",                  "#7f8fa6"),
+    ("base / remaining_budget",         "base_remaining_budget.jsonl",      "#27ae60"),
+    ("long-500 / base prompt",          "long-500_base.jsonl",              "#2C3E50"),
+    ("long-500 / remaining_budget",     "long-500_remaining_budget.jsonl",  "#C2185B"),
+    ("long-strict / base prompt",       "long-strict_base.jsonl",           "#e67e22"),
+    ("long-strict / remaining_budget",  "long-strict_remaining_budget.jsonl","#8e44ad"),
 ]
 BINS = [(1, 9), (9, 17), (17, 25), (25, 33), (33, 40.001)]
 
@@ -177,6 +179,7 @@ def main():
                 f"{r_:+.3f}", ha="center", fontsize=10, fontweight="bold")
     ax.set_ylabel("Pearson r(elapsed_at_commit, T)", fontsize=11)
     ax.set_ylim(-0.35, 0.95)
+    plt.setp(ax.get_xticklabels(), rotation=15, ha="right", fontsize=8)
     ax.set_title("T-conditioning signal: does commit time track T?", fontsize=12)
     ax.tick_params(axis="x", labelsize=9)
     plt.setp(ax.get_xticklabels(), rotation=8, ha="right")

@@ -749,3 +749,15 @@ def eval_long_strict_probe(num_examples: int = 498):
         label = f"{j['run_label']}/{j['variants'][0]}"
         print(f"  {label:30s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
               f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+@app.local_entrypoint()
+def next_long_additive_qwen3_4b():
+    """100-step test of the ADDITIVE reward (c + λ_f · f). Hypothesis: gives RL
+    a gradient on pacing INDEPENDENT of correctness, preventing the fixed-commit-
+    time policy that c·f always converges to.
+    Uses prompt_variant=remaining_budget (loud), λ_f=0.5. ~1.5h, ~$10-15.
+    If T-tracking survives at step_100 (probe r > 0.3), extend to 500 steps.
+    See configs/rl/ctrl0_u1_40_long_additive_qwen3_4b.toml."""
+    _launch_one("rl/ctrl0_u1_40_long_additive_qwen3_4b.toml",
+                "ctrl0-qwen3-4b-u1-40-long-additive")
