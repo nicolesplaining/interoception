@@ -164,7 +164,7 @@ def _resume_arg_if_needed(cfg_path: str) -> list[str]:
     timeout=24 * 3600,
 )
 def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception",
-              extra_args: list[str] | None = None) -> dict:
+              extra_args: list[str] | None = None, wandb_offline: bool = False) -> dict:
     """Run a prime-rl training job. prime-rl orchestrates vllm + trainer internally.
 
     Local logging mirror — everything wandb sees also lands on the
@@ -192,6 +192,22 @@ def train_run(toml_name: str, run_name: str, wandb_project: str = "interoception
     os.environ["HF_HOME"] = "/cache/hf"
     os.environ["WANDB_PROJECT"] = wandb_project
     os.environ["WANDB_NAME"] = run_name
+    # Set WANDB_RUN_ID deterministically from run_name. Two reasons:
+    # 1) Parallel sweeps under the same project (e.g. sweep_long_additive_v2)
+    #    otherwise collide if prime-rl derives run_id from a shared seed.
+    # 2) Re-running the same name (e.g. on preemption) resumes the same wandb
+    #    run instead of forking a new one.
+    import hashlib
+    os.environ["WANDB_RUN_ID"] = hashlib.md5(run_name.encode()).hexdigest()[:16]
+    # If we crashed/preempted and re-run with the same name, resume the wandb
+    # run rather than failing on "run already exists."
+    os.environ["WANDB_RESUME"] = "allow"
+    # For parallel sweeps: prime-rl passes id=None to wandb.init, so wandb
+    # generates IDs via random.choices() — which is seeded by the orchestrator's
+    # seed, so all parallel cells with the same seed collide on the same run ID.
+    # Offline mode bypasses the server entirely; can be `wandb sync`'d later.
+    if wandb_offline:
+        os.environ["WANDB_MODE"] = "offline"
     # wandb writes its full local archive under WANDB_DIR/wandb/run-*/. Pointing
     # this at the volume gives us a durable on-disk copy of everything wandb
     # streams, independent of the cloud upload.
@@ -797,11 +813,15 @@ def eval_long_additive_probe(num_examples: int = 498):
 
 def _train_then_probe_v2(lam_tag: str):
     """Train one v2 sweep cell and probe its step_200 checkpoint.
-    lam_tag in {"l10","l15","l30"} — matches the config + cell labels."""
+    lam_tag in {"l10","l15","l30"} — matches the config + cell labels.
+    Each cell gets its own wandb project so prime-rl's deterministic run-id
+    derivation (which collides across parallel cells in the same project)
+    is scoped per cell — runs land in interoception-l10/l15/l30."""
     cfg = f"rl/ctrl0_u1_40_long_additive_v2_{lam_tag}_qwen3_4b.toml"
     wandb_name = f"ctrl0-qwen3-4b-u1-40-long-additive-v2-{lam_tag}"
-    print(f"=== TRAIN: {lam_tag} ===")
-    r = train_run.remote(cfg, wandb_name)
+    wandb_project = f"interoception-{lam_tag}"
+    print(f"=== TRAIN: {lam_tag} (wandb: {wandb_project}/{wandb_name}, offline mode) ===")
+    r = train_run.remote(cfg, wandb_name, wandb_project=wandb_project, wandb_offline=True)
     print(f"  train[{lam_tag}]: ok={r.get('ok')}  rc={r.get('returncode')}  dur={r.get('duration_s')}s")
     if not r.get("ok"):
         print(f"  TRAINING FAILED ({lam_tag}) — skipping probe. err={r.get('error', '')[:200]}")
