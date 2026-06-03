@@ -793,3 +793,108 @@ def eval_long_additive_probe(num_examples: int = 498):
         label = f"{j['run_label']}/{j['variants'][0]}"
         print(f"  {label:30s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
               f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+def _train_then_probe_v2(lam_tag: str):
+    """Train one v2 sweep cell and probe its step_200 checkpoint.
+    lam_tag in {"l10","l15","l30"} — matches the config + cell labels."""
+    cfg = f"rl/ctrl0_u1_40_long_additive_v2_{lam_tag}_qwen3_4b.toml"
+    wandb_name = f"ctrl0-qwen3-4b-u1-40-long-additive-v2-{lam_tag}"
+    print(f"=== TRAIN: {lam_tag} ===")
+    r = train_run.remote(cfg, wandb_name)
+    print(f"  train[{lam_tag}]: ok={r.get('ok')}  rc={r.get('returncode')}  dur={r.get('duration_s')}s")
+    if not r.get("ok"):
+        print(f"  TRAINING FAILED ({lam_tag}) — skipping probe. err={r.get('error', '')[:200]}")
+        return {"cell": lam_tag, "train_ok": False, "probe": None}
+
+    print(f"\n=== PROBE: {lam_tag} step_200 ===")
+    adapter = f"/cache/runs/ctrl0_u1_40_long_additive_v2_{lam_tag}_qwen3_4b/weights/step_200/lora_adapters"
+    label = f"long-additive-v2-{lam_tag}"
+    jobs = [{"adapter_path": adapter, "adapter_name": label,
+             "run_label": label, "variants": (v,)}
+            for v in ("base", "remaining_budget")]
+    calls = [(j, eval_prompt_salience_run.spawn(num_examples=498, **j)) for j in jobs]
+    probe_results = []
+    for j, c in calls:
+        try:
+            rr = c.get()
+        except Exception as e:
+            rr = {"ok": False, "error": str(e)[:200]}
+        var = j['variants'][0]
+        print(f"  probe[{lam_tag}/{var:18s}]: ok={rr.get('ok')}  dur={rr.get('duration_s')}s  err={rr.get('error', '')[:80]}")
+        probe_results.append({"variant": var, **rr})
+    return {"cell": lam_tag, "train_ok": True, "probe": probe_results}
+
+
+@app.local_entrypoint()
+def next_long_additive_v2_l15_qwen3_4b():
+    """Single-cell entrypoint: λ_f=0.15. Use sweep_long_additive_v2 for the full 3-cell sweep."""
+    _launch_one("rl/ctrl0_u1_40_long_additive_v2_l15_qwen3_4b.toml",
+                "ctrl0-qwen3-4b-u1-40-long-additive-v2-l15")
+
+
+@app.local_entrypoint()
+def next_long_additive_v2_l10_qwen3_4b():
+    """Single-cell entrypoint: λ_f=0.10."""
+    _launch_one("rl/ctrl0_u1_40_long_additive_v2_l10_qwen3_4b.toml",
+                "ctrl0-qwen3-4b-u1-40-long-additive-v2-l10")
+
+
+@app.local_entrypoint()
+def next_long_additive_v2_l30_qwen3_4b():
+    """Single-cell entrypoint: λ_f=0.30."""
+    _launch_one("rl/ctrl0_u1_40_long_additive_v2_l30_qwen3_4b.toml",
+                "ctrl0-qwen3-4b-u1-40-long-additive-v2-l30")
+
+
+@app.local_entrypoint()
+def eval_long_additive_v2_probe(lam_tag: str = "l15", num_examples: int = 498, step: int = 200):
+    """Standalone probe entrypoint: probes long-additive-v2-{lam_tag} (default l15) at the
+    given step (default 200). Runs 2 cells (base + remaining_budget). Use sweep_long_additive_v2
+    for the combined train+probe flow."""
+    adapter = f"/cache/runs/ctrl0_u1_40_long_additive_v2_{lam_tag}_qwen3_4b/weights/step_{step}/lora_adapters"
+    label = f"long-additive-v2-{lam_tag}"
+    jobs = [{"adapter_path": adapter, "adapter_name": label,
+             "run_label": label, "variants": (v,)}
+            for v in ("base", "remaining_budget")]
+    print(f"Launching 2 probe cells for {label} step_{step}")
+    calls = [(j, eval_prompt_salience_run.spawn(num_examples=num_examples, **j)) for j in jobs]
+    for j, c in calls:
+        try:
+            r = c.get()
+        except Exception as e:
+            r = {"ok": False, "error": str(e)[:200]}
+        var = j['variants'][0]
+        print(f"  {label}/{var:18s}: ok={r.get('ok')}  rc={r.get('returncode')}  "
+              f"dur={r.get('duration_s')}s  err={r.get('error', '')}")
+
+
+@app.local_entrypoint()
+def sweep_long_additive_v2():
+    """Fire-and-forget λ sweep: trains 3 cells in parallel (λ∈{0.10,0.15,0.30}),
+    each auto-probed at step_200. All otherwise share the v2 protocol
+    (200 steps, G=16/batch=128, additive reward, remaining_budget prompt).
+
+    Wallclock: if modal runs cells in parallel, ~7.5h total (~6h train + ~1.5h probe).
+    If modal serializes (as happened with the long-additive probe), expect ~22h total.
+    Per-cell cost ~$25 (~$75 for sweep)."""
+    import modal as _modal
+    lam_tags = ["l10", "l15", "l30"]
+    print(f"Launching {len(lam_tags)}-cell λ sweep: {lam_tags}")
+    # Spawn all cells in parallel via .spawn so they don't block on each other.
+    # Each cell is a local function call to _train_then_probe_v2 which itself
+    # uses .remote/.spawn for the underlying modal functions.
+    # We use Python threads to fan out the spawn calls (each blocks on .remote/.spawn).
+    import concurrent.futures as _f
+    with _f.ThreadPoolExecutor(max_workers=len(lam_tags)) as ex:
+        futures = {ex.submit(_train_then_probe_v2, lt): lt for lt in lam_tags}
+        results = {}
+        for fut in _f.as_completed(futures):
+            lt = futures[fut]
+            try:
+                results[lt] = fut.result()
+            except Exception as e:
+                results[lt] = {"cell": lt, "error": str(e)[:200]}
+    print("\n=== SWEEP COMPLETE ===")
+    for lt in lam_tags:
+        print(f"  {lt}: {results.get(lt)}")
