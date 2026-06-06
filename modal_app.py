@@ -1129,9 +1129,13 @@ def sweep_windowed():
     volumes={"/cache": volume},
     timeout=24 * 3600,
 )
-def auto_probe_windowed_when_ready():
+def auto_probe_windowed_when_ready(num_examples: int = 200):
     """Poll every 5 min for windowed-sweep cells with step_200 weights; spawn
-    probes as each cell completes."""
+    probes as each cell completes.
+
+    Default num_examples=200 (down from 498) for exploratory iteration speed:
+    n=200 gives r std error ≈ 0.07 (good enough to distinguish r=0.5 vs r=0.8)
+    and probe wallclock drops from ~70-90 min to ~30 min."""
     import os, time
     lam_tags = ["l15", "l30", "l50"]
     probed = set()
@@ -1145,11 +1149,11 @@ def auto_probe_windowed_when_ready():
             adapter = f"/cache/runs/ctrl0_u1_40_windowed_{lt}_qwen3_4b/weights/step_100/lora_adapters"
             if os.path.exists(adapter):
                 label = f"windowed-{lt}"
-                print(f"[iter {iter_no}] {lt} ready — spawning 2 probes", flush=True)
+                print(f"[iter {iter_no}] {lt} ready — spawning 2 probes (n={num_examples})", flush=True)
                 for v in ("base", "remaining_budget"):
                     eval_prompt_salience_run.spawn(
                         adapter_path=adapter, adapter_name=label, run_label=label,
-                        variants=(v,), num_examples=498,
+                        variants=(v,), num_examples=num_examples,
                     )
                 probed.add(lt)
         if len(probed) < len(lam_tags):
