@@ -1009,6 +1009,15 @@ def sync_v2_wandb():
 
 
 @app.local_entrypoint()
+def sync_stage2_wandb():
+    """Sync stage2_kl_* offline wandb runs to cloud."""
+    results = wandb_sync_offline.remote("stage2_kl")
+    print("\n=== sync results ===")
+    for r in results:
+        print(f"  {r['cell']:55s} / {r['segment']}: rc={r['rc']}")
+
+
+@app.local_entrypoint()
 def sweep_stage2_kl():
     """Fire-and-forget β sweep for 2-stage KL-anchored curriculum. 5 cells:
     kl_tau ∈ {0, 1e-4, 1e-3, 1e-2, 1e-1}. All start from the v2-l30-merged
@@ -1093,6 +1102,70 @@ def auto_probe_stage2_when_ready():
             time.sleep(300)
     print(f"all {len(beta_tags)} cells probed (probes spawned). watcher exiting.", flush=True)
     return list(probed)
+
+
+@app.local_entrypoint()
+def sweep_windowed():
+    """Fire-and-forget λ sweep with windowed_additive reward (asymmetric Gaussian
+    f peaked at t=T). 3 cells: λ ∈ {0.15, 0.30, 0.50}, σ_under=0.25, σ_over=0.10.
+    Same protocol as v2 (200 steps, G=16/batch=128, +remaining_budget prompt) —
+    only the reward shape changes. Tests whether the bimodal regime under flat-1
+    additive disappears with a peaked f-shape (Kanishk's hypothesis)."""
+    lam_tags = ["l15", "l30", "l50"]
+    print(f"Spawning {len(lam_tags)}-cell windowed-reward λ sweep: {lam_tags}")
+    for lt in lam_tags:
+        cfg = f"rl/ctrl0_u1_40_windowed_{lt}_qwen3_4b.toml"
+        wandb_name = f"ctrl0-qwen3-4b-u1-40-windowed-{lt}"
+        wandb_project = f"interoception-windowed-{lt}"
+        handle = train_run.spawn(cfg, wandb_name,
+                                 wandb_project=wandb_project, wandb_offline=True)
+        print(f"  {lt}: spawned (call={handle.object_id})  wandb={wandb_project}/{wandb_name}")
+    print("\nAll trainings spawned. Local entrypoint exiting; modal app continues server-side.")
+    print("Probes auto-fire when each cell hits step_200 — run watch_and_probe_windowed.")
+
+
+@app.function(
+    image=image,
+    volumes={"/cache": volume},
+    timeout=24 * 3600,
+)
+def auto_probe_windowed_when_ready():
+    """Poll every 5 min for windowed-sweep cells with step_200 weights; spawn
+    probes as each cell completes."""
+    import os, time
+    lam_tags = ["l15", "l30", "l50"]
+    probed = set()
+    iter_no = 0
+    while len(probed) < len(lam_tags):
+        iter_no += 1
+        volume.reload()
+        for lt in lam_tags:
+            if lt in probed:
+                continue
+            adapter = f"/cache/runs/ctrl0_u1_40_windowed_{lt}_qwen3_4b/weights/step_200/lora_adapters"
+            if os.path.exists(adapter):
+                label = f"windowed-{lt}"
+                print(f"[iter {iter_no}] {lt} ready — spawning 2 probes", flush=True)
+                for v in ("base", "remaining_budget"):
+                    eval_prompt_salience_run.spawn(
+                        adapter_path=adapter, adapter_name=label, run_label=label,
+                        variants=(v,), num_examples=498,
+                    )
+                probed.add(lt)
+        if len(probed) < len(lam_tags):
+            remaining = sorted(set(lam_tags) - probed)
+            print(f"[iter {iter_no}] {len(probed)}/{len(lam_tags)} probed; waiting on {remaining}", flush=True)
+            time.sleep(300)
+    print(f"all {len(lam_tags)} cells probed. watcher exiting.", flush=True)
+    return list(probed)
+
+
+@app.local_entrypoint()
+def watch_and_probe_windowed():
+    """Spawn the windowed-sweep auto-probe watcher server-side."""
+    handle = auto_probe_windowed_when_ready.spawn()
+    print(f"spawned auto-probe watcher (call={handle.object_id})")
+    print("watcher will run server-side; safe to close terminal.")
 
 
 @app.local_entrypoint()

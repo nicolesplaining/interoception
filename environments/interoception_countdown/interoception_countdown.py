@@ -70,13 +70,27 @@ class InteroceptionConfig(BaseModel):
     #     model can't learn "be on time even if uncertain" — RL converges to a fixed-
     #     commit-time policy that ignores T. Additive keeps timing as a marginal reward
     #     target even when c is high. λ_f ∈ ~[0.25, 1.0] is the useful range.
-    reward_shape: Literal["hyperbolic", "exponential", "asymmetric", "additive"] = "hyperbolic"
+    #   "windowed_additive" : c + λ_f · f(t,T), with f as an asymmetric Gaussian
+    #     peaked at t=T instead of the flat-1-ceiling shape. Tests Kanishk's
+    #     hypothesis that the bimodal λ regime under additive is shape-induced
+    #     (flat-1 = no gradient to differentiate commit-at-0 vs commit-at-T, so
+    #     RL takes the lazy path of committing early). With a peak, the model
+    #     has explicit incentive to commit AT T. Width controlled by sigma_under
+    #     (under-shoot, gentle) and sigma_over (over-shoot, sharp).
+    reward_shape: Literal["hyperbolic", "exponential", "asymmetric", "additive",
+                          "windowed_additive"] = "hyperbolic"
     # Exponential decay coefficient (only used when reward_shape="exponential").
     reward_alpha: float = 1.0
-    # Weight on the time term f(t,T) when reward_shape="additive". Reward becomes
-    # c + lambda_f · f(t,T). λ=0.5 is the recommended starting point (correctness
-    # still dominates but pacing is always present).
+    # Weight on the time term f(t,T) when reward_shape="additive" or
+    # "windowed_additive". Reward becomes c + lambda_f · f(t,T). λ=0.5 is
+    # the recommended starting point.
     lambda_f: float = 0.5
+    # Window widths for reward_shape="windowed_additive". Asymmetric: wider under
+    # (gentle penalty for finishing early), narrower over (sharp penalty for
+    # missing the deadline). Values are fractions of T, so sigma_under=0.25
+    # means "1σ ≈ 25% of T below the budget."
+    sigma_under: float = 0.25
+    sigma_over: float = 0.10
     # Control flags for the f(t,T) ablations (Kanishk's 2026-05-24 controls thread):
     #   reward_time_term=False -> f(t,T)=1 always, so the reward collapses to pure
     #     correctness c (no timing term). Used by control A (no time reward) and
@@ -240,6 +254,8 @@ class CountdownTimeBudgetEnv(vf.MultiTurnEnv):
             "enforce_max_time": self.cfg.enforce_max_time,
             "attempt_bonus": self.cfg.attempt_bonus,
             "reward_time_term": self.cfg.reward_time_term,
+            "sigma_under": self.cfg.sigma_under,
+            "sigma_over": self.cfg.sigma_over,
             # Needed so the reward-time elapsed finalizer (_finalize_elapsed) can
             # recompute sim latency over the FULL trajectory, incl. the final turn.
             "timing_source": self.cfg.timing_source,
@@ -463,11 +479,21 @@ def _bucket(state: vf.State, answer) -> str:
 # --- New reward shapes (hyperbolic / exponential) ---
 
 def _time_factor(t: float, T: float, shape: str, alpha: float,
-                 max_time_multiplier: float, enforce_max_time: bool = True) -> float:
-    """Pure time term f(t,T), independent of correctness: 1.0 in budget, decayed past T.
+                 max_time_multiplier: float, enforce_max_time: bool = True,
+                 sigma_under: float = 0.25, sigma_over: float = 0.10) -> float:
+    """Pure time term f(t,T), independent of correctness.
+
+    - "hyperbolic" / "exponential": 1.0 in budget, decayed past T (flat-1 ceiling).
+    - "windowed_additive": asymmetric Gaussian peaked at t=T, wider σ for under-shoot
+      (gentle) than for over-shoot (sharp). No flat region — the model has continuous
+      gradient toward t=T from either side.
 
     With no time-based cutoff (v2/controls), the hyperbolic factor is pure
     min(1, T/t) — no decay cap, t bounded naturally by max_turns/seq_len."""
+    if shape == "windowed_additive":
+        # Width is a fraction of T; sigma_under > sigma_over by convention.
+        sigma = sigma_under if t < T else sigma_over
+        return math.exp(-((t - T) / (sigma * T)) ** 2)
     if t <= T:
         return 1.0
     capped_t = t if not enforce_max_time else min(t, max_time_multiplier * T)
@@ -613,7 +639,9 @@ def f_term(state, answer, **_) -> float:
     return _time_factor(t, T, cfg.get("reward_shape", "hyperbolic"),
                         cfg.get("reward_alpha", 1.0),
                         cfg.get("max_time_multiplier", 5.0),
-                        cfg.get("enforce_max_time", True))
+                        cfg.get("enforce_max_time", True),
+                        sigma_under=cfg.get("sigma_under", 0.25),
+                        sigma_over=cfg.get("sigma_over", 0.10))
 
 
 @vf.reward
@@ -710,12 +738,13 @@ def load_environment(**kwargs) -> vf.Environment:
             (quit_penalty, cfg.beta_quit),
             (timeout_penalty, cfg.gamma),
         ]
-    elif cfg.reward_shape == "additive":
+    elif cfg.reward_shape in ("additive", "windowed_additive"):
         # c + λ_f · f(t,T) — composed at the Rubric level out of two existing
         # functions: is_correct (returns 1 iff correct, 0 else) and f_term
-        # (returns f regardless of correctness). The diagnostic_metrics list
-        # still includes both at weight=0, but the Rubric just sums weighted
-        # contributions, so total reward = 1·is_correct + λ_f·f_term + 0·… .
+        # (returns f regardless of correctness). For "additive", f is flat-1-
+        # ceiling (1 if t≤T else T/t); for "windowed_additive", f is an asymmetric
+        # Gaussian peaked at t=T. The Rubric composition is identical — the
+        # difference is entirely in what f_term returns (via _time_factor).
         reward_funcs = [
             (is_correct, 1.0),
             (f_term, cfg.lambda_f),
