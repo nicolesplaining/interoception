@@ -12,7 +12,7 @@
 # Protocol mirrors v2 sweep (200 steps, G=16/batch=128, +remaining_budget prompt)
 # except reward_shape="windowed_additive" instead of "additive".
 
-max_steps = 200
+max_steps = 100
 seq_len = 2048
 output_dir = "/cache/runs/ctrl0_u1_40_windowed_l15_qwen3_4b"
 
@@ -50,8 +50,8 @@ kl_tau = 1e-3
 
 [trainer.scheduler]
 type = "linear"
-warmup_steps = 4
-decay_steps = 4
+warmup_steps = 2
+decay_steps = 2
 min_lr = 0.0
 
 [orchestrator]

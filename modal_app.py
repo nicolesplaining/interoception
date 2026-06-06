@@ -1142,7 +1142,7 @@ def auto_probe_windowed_when_ready():
         for lt in lam_tags:
             if lt in probed:
                 continue
-            adapter = f"/cache/runs/ctrl0_u1_40_windowed_{lt}_qwen3_4b/weights/step_200/lora_adapters"
+            adapter = f"/cache/runs/ctrl0_u1_40_windowed_{lt}_qwen3_4b/weights/step_100/lora_adapters"
             if os.path.exists(adapter):
                 label = f"windowed-{lt}"
                 print(f"[iter {iter_no}] {lt} ready — spawning 2 probes", flush=True)
