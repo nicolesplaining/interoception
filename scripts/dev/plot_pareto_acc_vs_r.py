@@ -42,18 +42,11 @@ def pearson(xs, ys):
 
 # (label, fname, color)
 CELLS = [
-    ("base (no RL)",        "base_remaining_budget.jsonl",                       "#27ae60"),
-    ("v1 λ=0.5",            "long-additive_remaining_budget.jsonl",              "#bcbd22"),
-    ("v2-flat λ=0.10",      "long-additive-v2-l10_remaining_budget.jsonl",       "#1f77b4"),
-    ("v2-flat λ=0.15",      "long-additive-v2-l15_remaining_budget.jsonl",       "#2ca02c"),
-    ("v2-flat λ=0.30",      "long-additive-v2-l30_remaining_budget.jsonl",       "#d62728"),
-    ("stage2 β=0",          "stage2-kl-b0_remaining_budget.jsonl",               "#ff9896"),
-    ("stage2 β=1e-4",       "stage2-kl-b4_remaining_budget.jsonl",               "#c5b0d5"),
-    ("stage2 β=1e-3",       "stage2-kl-b3_remaining_budget.jsonl",               "#c49c94"),
-    ("stage2 β=1e-2",       "stage2-kl-b2_remaining_budget.jsonl",               "#f7b6d2"),
-    ("stage2 β=1e-1",       "stage2-kl-b1_remaining_budget.jsonl",               "#dbdb8d"),
-    ("windowed λ=0.15",     "windowed-l15_remaining_budget.jsonl",               "#17becf"),
-    ("windowed λ=0.30",     "windowed-l30_remaining_budget.jsonl",               "#1976D2"),
+    ("base",                "base_remaining_budget.jsonl",                       "#27ae60"),
+    ("flat-1 λ=0.15",       "long-additive-v2-l15_remaining_budget.jsonl",       "#2ca02c"),
+    ("flat-1 λ=0.30",       "long-additive-v2-l30_remaining_budget.jsonl",       "#d62728"),
+    ("windowed λ=0.15",     "windowed-l15_remaining_budget.jsonl",               "#1976D2"),
+    ("windowed λ=0.30",     "windowed-l30_remaining_budget.jsonl",               "#2E7D32"),
     ("windowed λ=0.50",     "windowed-l50_remaining_budget.jsonl",               "#8E24AA"),
 ]
 
@@ -132,13 +125,10 @@ ax.plot(front_x, front_y, color="#888", lw=1.5, ls="--", alpha=0.6, zorder=1,
 
 ax.axhline(0, color="#ccc", lw=0.6)
 ax.axvline(0, color="#ccc", lw=0.6)
-ax.set_xlabel("Pearson r(elapsed_at_commit, T)  ←  pacing quality / T-tracking  →",
-              fontsize=11)
-ax.set_ylabel("Accuracy  ↑", fontsize=11)
+ax.set_xlabel("T-tracking  (Pearson r of commit time vs budget)", fontsize=12)
+ax.set_ylabel("Accuracy", fontsize=12)
 ax.set_xlim(-0.2, 1.0); ax.set_ylim(0, 0.6)
-ax.set_title("Pareto: accuracy vs T-tracking (eval set, matched prompt)\n"
-             "Frontier highlighted with bold outline; up-and-to-the-right = better on both",
-             fontsize=11)
+ax.set_title("Accuracy vs T-tracking", fontsize=13)
 ax.legend(loc="lower right", frameon=False, fontsize=10)
 ax.grid(alpha=0.25)
 

@@ -65,6 +65,8 @@ for cell, by_T in results.items():
     if cell not in CELL_STYLES:
         print(f"  skipping unknown cell {cell}")
         continue
+    if cell == "v2-flat-l15":
+        continue  # excluded — "ignore T" outlier dominates the y-axis scale
     label, color, ls = CELL_STYLES[cell]
     Ts = sorted(by_T)
     accs = [by_T[T][0] for T in Ts]
@@ -73,12 +75,10 @@ for cell, by_T in results.items():
     ax.plot(Ts, accs, marker="o", ms=10, color=color, lw=2.6, ls=ls,
             label=f"{label}  (n={ns[0] if ns else 0}/budget, {len(Ts)} budgets)")
 
-ax.set_xlabel("Budget T (s)  — fixed per-rollout", fontsize=12)
+ax.set_xlabel("Budget T (s)", fontsize=12)
 ax.set_ylabel("Accuracy on test set", fontsize=12)
-ax.set_xlim(0, 42); ax.set_ylim(0, 0.6)
-ax.set_title("Accuracy vs budget T — controlled (same problems at each T)\n"
-             "test set, matched (remaining_budget) prompt",
-             fontsize=11)
+ax.set_xlim(0, 42); ax.set_ylim(0, 0.4)
+ax.set_title("Accuracy vs budget T", fontsize=13)
 ax.legend(loc="upper left", frameon=False, fontsize=10)
 ax.grid(alpha=0.25)
 
