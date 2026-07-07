@@ -981,6 +981,42 @@ def next_long_additive_v2_l30_qwen3_4b():
 
 
 @app.local_entrypoint()
+def next_gdpo_qwen3_4b():
+    """GDPO — multi-objective decoupled advantage (arXiv:2601.05242).
+    Channels: (is_correct, f_term); weights (1.0, 0.5). windowed_additive
+    reward shape so f_term is peaked at t=T. Reads raw per-channel scalars
+    from rollout['metrics'] and performs GDPO's per-channel group-normalize
+    → weighted sum → batch renormalize. See
+    environments/interoception_countdown/gdpo_advantage.py."""
+    _launch_one("rl/ctrl0_u1_40_gdpo_qwen3_4b.toml",
+                "ctrl0-qwen3-4b-u1-40-gdpo")
+
+
+@app.local_entrypoint()
+def next_gdpo_smoke():
+    """Smoke run for GDPO: same config as next_gdpo_qwen3_4b, but max_steps=25.
+    Catches integration bugs (custom advantage import path, per-channel metrics
+    availability, etc.) in ~20 min instead of the full 3h run."""
+    r = train_run.spawn(
+        "rl/ctrl0_u1_40_gdpo_qwen3_4b.toml",
+        "ctrl0-qwen3-4b-u1-40-gdpo-smoke",
+        wandb_project="interoception",
+        extra_args=[
+            "--max-steps", "25",
+            # send smoke outputs to a distinct dir so we don't collide with the real run
+            "--output-dir", "/cache/runs/ctrl0_u1_40_gdpo_smoke_qwen3_4b",
+            # ckpt-often so we can inspect early trainer/orchestrator health
+            "--ckpt.interval", "5",
+        ],
+    )
+    try:
+        result = r.get()
+        print(f"smoke: {result}")
+    except Exception as e:
+        print(f"smoke failed: {e}")
+
+
+@app.local_entrypoint()
 def eval_long_additive_v2_probe(lam_tag: str = "l15", num_examples: int = 498, step: int = 200):
     """Standalone probe entrypoint: probes long-additive-v2-{lam_tag} (default l15) at the
     given step (default 200). Runs 2 cells (base + remaining_budget). Use sweep_long_additive_v2

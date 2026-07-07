@@ -10,10 +10,10 @@ The frontier is the set of non-dominated cells.
 
 Matched-prompt only for clarity (the primary metric across our experiments).
 """
-import json, math, re, pathlib
+import argparse, json, math, re, pathlib
 import matplotlib; matplotlib.use("Agg")
 import matplotlib.pyplot as plt
-DATA = pathlib.Path("analysis/eval_rollouts/prompt_salience/prompt_salience")
+DEFAULT_DATA = pathlib.Path("analysis/eval_rollouts/prompt_salience/prompt_salience")
 ELAPSED_RE = re.compile(r"\[([\d.]+)s elapsed")
 
 
@@ -51,7 +51,7 @@ CELLS = [
 ]
 
 
-def compute(fname):
+def compute(fname, DATA):
     if not (DATA / fname).exists():
         return None
     recs = [json.loads(l) for l in (DATA / fname).open()]
@@ -71,23 +71,8 @@ def compute(fname):
     return acc, r_val, len(committers), len(recs)
 
 
-# Compute (acc, r) for each cell
-points = []
-print(f"  {'cell':<28}  {'acc':>6}  {'r':>7}  {'n_commit':>9}")
-print("  " + "-" * 60)
-for label, fname, color in CELLS:
-    result = compute(fname)
-    if result is None:
-        print(f"  {label:<28}  (missing file)")
-        continue
-    acc, r_val, n_c, n_total = result
-    note = ""
-    points.append((label + note, color, acc, r_val))
-    print(f"  {label:<28}  {acc:>6.3f}  {r_val:>+7.3f}  {n_c:>9}")
-
-
-# Compute Pareto frontier (cells where no other cell has BOTH higher acc AND higher r)
 def is_pareto(i, pts):
+    """A cell is on the Pareto frontier if no other cell dominates it (higher on both axes)."""
     a_i, r_i = pts[i][2], pts[i][3]
     for j, (_, _, a_j, r_j) in enumerate(pts):
         if j == i: continue
@@ -95,43 +80,71 @@ def is_pareto(i, pts):
             return False
     return True
 
-pareto_idx = [i for i in range(len(points)) if is_pareto(i, points)]
-print()
-print(f"Pareto frontier ({len(pareto_idx)} cells):")
-for i in pareto_idx:
-    print(f"  {points[i][0]:<32}  acc={points[i][2]:.3f}  r={points[i][3]:+.3f}")
+
+def main():
+    ap = argparse.ArgumentParser()
+    ap.add_argument("--data-dir", type=pathlib.Path, default=DEFAULT_DATA,
+                    help="Directory containing the *_remaining_budget.jsonl probes")
+    ap.add_argument("--out-name", default="51_pareto_acc_vs_r.png",
+                    help="Basename for the output PNG under analysis/figures/")
+    ap.add_argument("--title", default="Accuracy vs T-tracking")
+    args = ap.parse_args()
+
+    DATA = args.data_dir
+
+    # Compute (acc, r) for each cell
+    points = []
+    print(f"data-dir: {DATA}")
+    print(f"  {'cell':<28}  {'acc':>6}  {'r':>7}  {'n_commit':>9}")
+    print("  " + "-" * 60)
+    for label, fname, color in CELLS:
+        result = compute(fname, DATA)
+        if result is None:
+            print(f"  {label:<28}  (missing file)")
+            continue
+        acc, r_val, n_c, n_total = result
+        points.append((label, color, acc, r_val))
+        print(f"  {label:<28}  {acc:>6.3f}  {r_val:>+7.3f}  {n_c:>9}")
+
+    pareto_idx = [i for i in range(len(points)) if is_pareto(i, points)]
+    print()
+    print(f"Pareto frontier ({len(pareto_idx)} cells):")
+    for i in pareto_idx:
+        print(f"  {points[i][0]:<32}  acc={points[i][2]:.3f}  r={points[i][3]:+.3f}")
+
+    # Plot
+    fig, ax = plt.subplots(figsize=(11, 7))
+    for i, (label, color, acc, r_val) in enumerate(points):
+        on_frontier = i in pareto_idx
+        ms = 16 if on_frontier else 11
+        edge = "black" if on_frontier else "none"
+        lw = 1.8 if on_frontier else 0
+        ax.scatter(r_val, acc, c=color, s=ms ** 1.8, edgecolors=edge, linewidths=lw,
+                   zorder=5 if on_frontier else 3, alpha=0.95)
+        ax.annotate(label, (r_val, acc), xytext=(7, 4), textcoords="offset points",
+                    fontsize=9, color="#222",
+                    fontweight="bold" if on_frontier else "normal")
+
+    front_pts = sorted([points[i] for i in pareto_idx], key=lambda p: p[3])
+    front_x = [p[3] for p in front_pts]
+    front_y = [p[2] for p in front_pts]
+    ax.plot(front_x, front_y, color="#888", lw=1.5, ls="--", alpha=0.6, zorder=1,
+            label="Pareto frontier")
+
+    ax.axhline(0, color="#ccc", lw=0.6)
+    ax.axvline(0, color="#ccc", lw=0.6)
+    ax.set_xlabel("T-tracking  (Pearson r of commit time vs budget)", fontsize=12)
+    ax.set_ylabel("Accuracy", fontsize=12)
+    ax.set_xlim(-0.2, 1.0); ax.set_ylim(0, 0.6)
+    ax.set_title(args.title, fontsize=13)
+    ax.legend(loc="lower right", frameon=False, fontsize=10)
+    ax.grid(alpha=0.25)
+
+    out = pathlib.Path("analysis/figures") / args.out_name
+    out.parent.mkdir(parents=True, exist_ok=True)
+    fig.tight_layout(); fig.savefig(out, dpi=150, bbox_inches="tight"); plt.close(fig)
+    print(f"\nwrote {out}")
 
 
-# Plot
-fig, ax = plt.subplots(figsize=(11, 7))
-for i, (label, color, acc, r_val) in enumerate(points):
-    on_frontier = i in pareto_idx
-    ms = 16 if on_frontier else 11
-    edge = "black" if on_frontier else "none"
-    lw = 1.8 if on_frontier else 0
-    ax.scatter(r_val, acc, c=color, s=ms ** 1.8, edgecolors=edge, linewidths=lw,
-               zorder=5 if on_frontier else 3, alpha=0.95)
-    # Label with slight offset
-    ax.annotate(label, (r_val, acc), xytext=(7, 4), textcoords="offset points",
-                fontsize=9, color="#222",
-                fontweight="bold" if on_frontier else "normal")
-
-# Pareto frontier line (connect frontier points sorted by r)
-front_pts = sorted([points[i] for i in pareto_idx], key=lambda p: p[3])
-front_x = [p[3] for p in front_pts]
-front_y = [p[2] for p in front_pts]
-ax.plot(front_x, front_y, color="#888", lw=1.5, ls="--", alpha=0.6, zorder=1,
-        label="Pareto frontier")
-
-ax.axhline(0, color="#ccc", lw=0.6)
-ax.axvline(0, color="#ccc", lw=0.6)
-ax.set_xlabel("T-tracking  (Pearson r of commit time vs budget)", fontsize=12)
-ax.set_ylabel("Accuracy", fontsize=12)
-ax.set_xlim(-0.2, 1.0); ax.set_ylim(0, 0.6)
-ax.set_title("Accuracy vs T-tracking", fontsize=13)
-ax.legend(loc="lower right", frameon=False, fontsize=10)
-ax.grid(alpha=0.25)
-
-out = pathlib.Path("analysis/figures/51_pareto_acc_vs_r.png")
-fig.tight_layout(); fig.savefig(out, dpi=150, bbox_inches="tight"); plt.close(fig)
-print(f"\nwrote {out}")
+if __name__ == "__main__":
+    main()

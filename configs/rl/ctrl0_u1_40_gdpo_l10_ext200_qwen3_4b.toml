@@ -1,0 +1,105 @@
+# GDPO — multi-objective RL via decoupled per-channel advantage normalization.
+#
+# Implements GDPO (arXiv:2601.05242) as an alternative to GRPO. Key change vs
+# ctrl0_u1_40_windowed_l30_qwen3_4b.toml: [orchestrator.advantage] points at
+# our custom gdpo_advantage_fn instead of using the default GRPO advantage.
+#
+# Reward channels: (is_correct, f_term), weights (1.0, 0.5) matching the
+# effective (c, λ_f · f) mixture the windowed additive config was training on.
+# But GDPO does per-channel group-normalization before summing, which prevents
+# the c-signal from being drowned by f-signal when most rollouts are wrong.
+#
+# reward_shape is windowed_additive so f_term uses the peaked-at-T shape.
+# lambda_f=1.0 keeps both rubric functions active with non-zero weight
+# (verifiers requires this so both metrics are aggregated), but the trainer
+# ignores the combined scalar and reads raw channels from rollout["metrics"].
+
+max_steps = 200
+seq_len = 2048
+output_dir = "/home/ubuntu/gdpo_out/ctrl0_u1_40_gdpo_l10_ext200_qwen3_4b"
+
+[ckpt]
+interval = 25
+
+[wandb]
+project = "interoception-gdpo-l10-ext200"
+entity = "nicolema-stanford-university"
+name = "ctrl0-qwen3-4b-u1-40-gdpo-l10-ext200"
+
+[model]
+name = "Qwen/Qwen3-4B-Instruct-2507"
+
+[trainer.model.lora]
+rank = 32
+alpha = 32.0
+dropout = 0.0
+target_modules = ["q_proj", "k_proj", "v_proj", "o_proj", "gate_proj", "up_proj", "down_proj"]
+
+[trainer.ckpt.weights]
+save_adapter_separately = true
+
+[trainer.optim]
+type = "adamw"
+lr = 5e-5
+max_norm = 1.0
+betas1 = 0.9
+betas2 = 0.999
+weight_decay = 0.01
+
+[trainer.loss]
+type = "default"
+kl_tau = 1e-3
+
+[trainer.scheduler]
+type = "linear"
+warmup_steps = 2
+decay_steps = 2
+min_lr = 0.0
+
+[orchestrator]
+batch_size = 128
+rollouts_per_example = 16
+seed = 0
+
+# Plug in the GDPO advantage instead of prime-rl's default group-mean baseline.
+# import_path is resolved via `import_object`, so the env pkg must be pip-installed
+# (it is, via `pip install -e /root/env_pkg` in modal_app.py).
+[orchestrator.advantage]
+type = "custom"
+import_path = "gdpo_advantage.gdpo_advantage_fn"
+kwargs = { channels = ["is_correct", "f_term"], weights = [1.0, 0.10], eps = 1e-6 }
+
+[[orchestrator.filters]]
+type = "gibberish"
+[[orchestrator.filters]]
+type = "repetition"
+[[orchestrator.filters]]
+type = "zero_advantage"
+enforce = false
+
+[orchestrator.train.sampling]
+max_completion_tokens = 128
+temperature = 1.0
+
+[[orchestrator.train.env]]
+id = "interoception-countdown"
+name = "ctrl0-u1-40-gdpo-l10-ext200-qwen3-4b-train"
+args = { problems_jsonl = "/home/ubuntu/interoception-1/data/train.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 0, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "windowed_additive", lambda_f = 1.0, sigma_under = 0.25, sigma_over = 0.10, attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true, prompt_variant = "remaining_budget" }
+
+[orchestrator.eval]
+interval = 50
+
+[orchestrator.eval.sampling]
+max_completion_tokens = 128
+temperature = 1.0
+
+[[orchestrator.eval.env]]
+id = "interoception-countdown"
+name = "ctrl0-u1-40-gdpo-l10-ext200-eval-uniform"
+num_examples = 498
+rollouts_per_example = 1
+args = { problems_jsonl = "/home/ubuntu/interoception-1/data/eval.jsonl", target_s_min = 1.0, target_s_max = 40.0, target_s_dist = "uniform", dataset_seed = 777, timing_source = "sim", hardware = "A100_80GB", sim_model = "Qwen3-4B", max_turns = 16, reward_shape = "windowed_additive", lambda_f = 1.0, sigma_under = 0.25, sigma_over = 0.10, attempt_bonus = 0.0, enforce_max_time = false, reward_time_term = true, prompt_variant = "remaining_budget" }
+
+
+[inference]
+enable_fp32_lm_head = true

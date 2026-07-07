@@ -219,9 +219,15 @@ def _sampling_params(args):
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("--base-model", required=True, help="HF id or path of the base model")
-    ap.add_argument("--adapter-path", default=None, help="Optional LoRA adapter dir")
-    ap.add_argument("--adapter-name", default="adapter", help="Label for the LoRA in vLLM")
+    ap.add_argument("--adapter-path", default=None, help="Optional LoRA adapter dir (single-adapter mode)")
+    ap.add_argument("--adapter-name", default="adapter", help="Label for the LoRA in vLLM (single-adapter mode)")
     ap.add_argument("--run-label", default=None, help="Filename label (default: 'base' or adapter-name)")
+    ap.add_argument("--adapters", default=None,
+                    help="Multi-adapter mode. Comma-separated 'label:path' pairs; path can be 'none'/'null' "
+                         "for base model. Iterates all adapters under a single vLLM instance, hot-swapping "
+                         "the LoRA per request. Output filenames use each label as run_label. Mutually "
+                         "exclusive with --adapter-path / --adapter-name / --run-label. Example: "
+                         "'base:none,v2-l30:/path/to/adapters,windowed-l15:/path/to/other'.")
     ap.add_argument("--variants", nargs="+", default=["base", "remaining_budget"])
     ap.add_argument("--num-examples", type=int, default=498)
     ap.add_argument("--output-dir", default="analysis/eval_rollouts/prompt_salience")
@@ -251,16 +257,45 @@ def main():
     ap.add_argument("--force", action="store_true", help="Re-run even if output exists")
     args = ap.parse_args()
 
-    run_label = args.run_label or (args.adapter_name if args.adapter_path else "base")
     out_dir = pathlib.Path(args.output_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
+
+    # Build the list of (label, path_or_None) cells to run. In single-adapter mode
+    # (default; backward compat), this is one entry; in --adapters mode we parse
+    # multiple. Each entry gets its own output filename via run_label.
+    def _parse_adapters(spec: str) -> list[tuple[str, str | None]]:
+        cells = []
+        for pair in spec.split(","):
+            pair = pair.strip()
+            if not pair:
+                continue
+            if ":" not in pair:
+                raise ValueError(f"--adapters entry must be 'label:path' or 'label:none', got {pair!r}")
+            label, path = pair.split(":", 1)
+            label = label.strip()
+            path = path.strip()
+            if path.lower() in ("none", "null", "", "base"):
+                cells.append((label, None))
+            else:
+                cells.append((label, path))
+        return cells
+
+    if args.adapters is not None:
+        if args.adapter_path is not None:
+            raise SystemExit("--adapters and --adapter-path are mutually exclusive")
+        cells = _parse_adapters(args.adapters)
+    else:
+        # Single-adapter (or base-only) legacy path
+        single_label = args.run_label or (args.adapter_name if args.adapter_path else "base")
+        cells = [(single_label, args.adapter_path)]
 
     # Lazy import vLLM — it's heavy and only needed once we know we're running.
     from vllm import LLM
     from vllm.lora.request import LoRARequest
 
-    enable_lora = args.adapter_path is not None
-    print(f"loading vLLM  base={args.base_model}  lora={'on' if enable_lora else 'off'}")
+    enable_lora = any(p is not None for _, p in cells)
+    print(f"loading vLLM  base={args.base_model}  lora={'on' if enable_lora else 'off'}  "
+          f"({len(cells)} cell(s): {[label for label, _ in cells]})")
     llm = LLM(
         model=args.base_model,
         enable_lora=enable_lora,
@@ -269,31 +304,42 @@ def main():
         gpu_memory_utilization=args.gpu_mem_fraction,
         dtype="bfloat16",
     )
-    lora_request = None
-    if enable_lora:
-        lora_request = LoRARequest(args.adapter_name, 1, args.adapter_path)
-        print(f"  LoRA: {args.adapter_path}  (lora_int_id=1)")
+
+    # Build a LoRARequest per non-None cell. Each cell gets a unique int_id so
+    # vLLM can hot-swap between them per request without evicting from memory.
+    lora_requests: dict[str, "LoRARequest | None"] = {}
+    for i, (label, path) in enumerate(cells):
+        if path is None:
+            lora_requests[label] = None
+        else:
+            lora_requests[label] = LoRARequest(label, i + 1, path)
+            print(f"  LoRA[{label}] -> {path}  (lora_int_id={i+1})")
 
     # If target-s-list is set, sweep over fixed budgets (vLLM stays loaded across
     # all of them — this is the big wallclock win, since cold-start dominates).
     if args.target_s_list:
         budgets = [float(b.strip()) for b in args.target_s_list.split(",") if b.strip()]
-        print(f"\nbudget sweep: {len(budgets)} budgets × {len(args.variants)} variants "
-              f"= {len(budgets) * len(args.variants)} runs (vLLM reused throughout)")
-        for budget in budgets:
-            # Snapshot original args, override min/max so the env's per-problem
-            # rng.uniform(min, max) collapses to a constant.
-            args.target_s_min = budget
-            args.target_s_max = budget
-            budget_tag = f"T{int(round(budget)):02d}"
-            for variant in args.variants:
-                out_path = out_dir / f"{run_label}_{budget_tag}_{variant}.jsonl"
-                asyncio.run(run_variant(args, llm, lora_request, variant, out_path))
+        total = len(cells) * len(budgets) * len(args.variants)
+        print(f"\nsweep: {len(cells)} cells × {len(budgets)} budgets × {len(args.variants)} variants "
+              f"= {total} runs (vLLM reused throughout)")
+        for label, _ in cells:
+            lora_request = lora_requests[label]
+            for budget in budgets:
+                # Snapshot original args, override min/max so the env's per-problem
+                # rng.uniform(min, max) collapses to a constant.
+                args.target_s_min = budget
+                args.target_s_max = budget
+                budget_tag = f"T{int(round(budget)):02d}"
+                for variant in args.variants:
+                    out_path = out_dir / f"{label}_{budget_tag}_{variant}.jsonl"
+                    asyncio.run(run_variant(args, llm, lora_request, variant, out_path))
     else:
-        # Original behavior: one variant per run, random T from [min, max].
-        for variant in args.variants:
-            out_path = out_dir / f"{run_label}_{variant}.jsonl"
-            asyncio.run(run_variant(args, llm, lora_request, variant, out_path))
+        # Multi-cell (or single) run: label × variant grid, random T from [min, max].
+        for label, _ in cells:
+            lora_request = lora_requests[label]
+            for variant in args.variants:
+                out_path = out_dir / f"{label}_{variant}.jsonl"
+                asyncio.run(run_variant(args, llm, lora_request, variant, out_path))
 
 
 if __name__ == "__main__":

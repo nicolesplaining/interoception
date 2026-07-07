@@ -20,4 +20,4 @@ dependencies = [
 sim = ["hwprop"]
 
 [tool.setuptools]
-py-modules = ["interoception_countdown", "_solver"]
+py-modules = ["interoception_countdown", "_solver", "gdpo_advantage"]
