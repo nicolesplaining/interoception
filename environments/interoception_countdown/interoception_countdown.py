@@ -101,6 +101,12 @@ class InteroceptionConfig(BaseModel):
     #     by control B together with max_turns=1 (single-turn, no time signal at all).
     reward_time_term: bool = True
     inject_elapsed: bool = True
+    # Correctness-gated multiplicative reward: when True, f_term returns 0
+    # whenever the answer is wrong. Used by GDPO to force the pacing channel
+    # to only carry signal on correct rollouts (so a well-paced but incorrect
+    # answer gets zero pacing advantage). Off by default; the champion
+    # sym-l22-lr3e5-ext200 doesn't use this.
+    gate_f_term_on_correctness: bool = False
     # Attempt bonus: reward for emitting *any* parseable arithmetic expression,
     # whether or not it satisfies the multiset/target constraints.
     # LEGACY / OFF BY DEFAULT: this is the v1 confound that reward-hacked Qwen2.5-3B
@@ -256,6 +262,7 @@ class CountdownTimeBudgetEnv(vf.MultiTurnEnv):
             "reward_time_term": self.cfg.reward_time_term,
             "sigma_under": self.cfg.sigma_under,
             "sigma_over": self.cfg.sigma_over,
+            "gate_f_term_on_correctness": self.cfg.gate_f_term_on_correctness,
             # Needed so the reward-time elapsed finalizer (_finalize_elapsed) can
             # recompute sim latency over the FULL trajectory, incl. the final turn.
             "timing_source": self.cfg.timing_source,
@@ -630,12 +637,19 @@ def f_term(state, answer, **_) -> float:
     this exposes the timing half on its own so the split is visible on wandb without
     backing it out by division (Kanishk 2026-05-24). For controls A/B (reward_time_term
     off) this is the key control metric: does the model still land in-budget even
-    when timing isn't rewarded?"""
+    when timing isn't rewarded?
+
+    With `gate_f_term_on_correctness=True` (used by GDPO gated recipes) f_term
+    returns 0 whenever the answer is wrong — the pacing signal only exists on
+    correct answers, so per-channel GDPO advantage on the timing axis carries no
+    reward for a well-paced but incorrect rollout."""
     cfg = state.get("_cfg") or {}
     T = state.get("target_s")
     t = _elapsed(state)
     if not T or t is None:
         return 1.0
+    if cfg.get("gate_f_term_on_correctness", False) and _bucket(state, answer) != "correct":
+        return 0.0
     return _time_factor(t, T, cfg.get("reward_shape", "hyperbolic"),
                         cfg.get("reward_alpha", 1.0),
                         cfg.get("max_time_multiplier", 5.0),

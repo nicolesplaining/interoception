@@ -75,12 +75,24 @@ CELLS = [
     ("gdpo l15-ext200",        DIR_H100, "gdpo-l15-ext200_remaining_budget.jsonl",      "#ff5722", "P"),
     ("gdpo l50-ext200",        DIR_H100, "gdpo-l50-ext200_remaining_budget.jsonl",      "#bf360c", "P"),
     # Round 4 (winners are highlighted)
-    ("gdpo l10-ext200 ★",      DIR_H100, "gdpo-l10-ext200_remaining_budget.jsonl",      "#c2185b", "*"),
+    ("gdpo l10-ext200",        DIR_H100, "gdpo-l10-ext200_remaining_budget.jsonl",      "#c2185b", "*"),
     ("gdpo l20-ext200",        DIR_H100, "gdpo-l20-ext200_remaining_budget.jsonl",      "#e91e63", "*"),
     ("gdpo l30-ext200",        DIR_H100, "gdpo-l30-ext200_remaining_budget.jsonl",      "#ad1457", "*"),
-    ("gdpo sym-l25-ext200 ★★", DIR_H100, "gdpo-sym-l25-ext200_remaining_budget.jsonl",  "#1a237e", "*"),
+    ("gdpo sym-l25-ext200",    DIR_H100, "gdpo-sym-l25-ext200_remaining_budget.jsonl",  "#1a237e", "*"),
     ("gdpo sym-l30-ext200",    DIR_H100, "gdpo-sym-l30-ext200_remaining_budget.jsonl",  "#0d47a1", "*"),
     ("gdpo l15-ext300",        DIR_H100, "gdpo-l15-ext300_remaining_budget.jsonl",      "#01579b", "*"),
+    # Rounds 5-9
+    ("gdpo sym-l17-ext200",       DIR_H100, "gdpo-sym-l17-ext200_remaining_budget.jsonl",        "#7986cb", "*"),
+    ("gdpo sym-l20-ext200",       DIR_H100, "gdpo-sym-l20-ext200_remaining_budget.jsonl",        "#5c6bc0", "*"),
+    ("gdpo sym-l22-ext200 ★",     DIR_H100, "gdpo-sym-l22-ext200_remaining_budget.jsonl",        "#e64a19", "X"),
+    ("gdpo sym-l25-ext300",       DIR_H100, "gdpo-sym-l25-ext300_remaining_budget.jsonl",        "#283593", "*"),
+    ("gdpo sym-l30-ext300",       DIR_H100, "gdpo-sym-l30-ext300_remaining_budget.jsonl",        "#1a237e", "*"),
+    ("gdpo sym-l25-wide-ext200",  DIR_H100, "gdpo-sym-l25-wide-ext200_remaining_budget.jsonl",   "#3949ab", "*"),
+    ("gdpo sym-l22-lr3e5-ext200 ★★★", DIR_H100, "gdpo-sym-l22-lr3e5-ext200_remaining_budget.jsonl", "#c62828", "X"),
+    ("gdpo sym-l22-lr1e5-ext200", DIR_H100, "gdpo-sym-l22-lr1e5-ext200_remaining_budget.jsonl",  "#d84315", "P"),
+    ("gdpo sym-l22-lr3e5-ext300", DIR_H100, "gdpo-sym-l22-lr3e5-ext300_remaining_budget.jsonl",  "#bf360c", "P"),
+    ("gdpo sym-l22-lr3e5-r16",    DIR_H100, "gdpo-sym-l22-lr3e5-r16-ext200_remaining_budget.jsonl", "#ff7043", "P"),
+    ("gdpo sym-l23-lr3e5-ext200", DIR_H100, "gdpo-sym-l23-lr3e5-ext200_remaining_budget.jsonl",  "#ff5722", "P"),
 ]
 
 fig, ax = plt.subplots(figsize=(12, 8))
